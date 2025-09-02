@@ -107,7 +107,11 @@ const Register = () => {
       const result = await registerUser(userData);
       
       if (result.success) {
-        if (result.loggedIn) {
+        if (result.needsVerification) {
+          // User needs to verify email, redirect to verification page
+          console.log('Registration successful, redirecting to email verification');
+          navigate('/verify-email', { state: { email: result.email }, replace: true });
+        } else if (result.loggedIn) {
           // User is immediately logged in, redirect to appropriate dashboard
           const redirectPath = userType === 'admin' ? '/admin/dashboard' : '/dashboard';
           console.log('Registration successful, redirecting to:', redirectPath);

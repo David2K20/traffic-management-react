@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { FaCar, FaEye, FaEyeSlash } from 'react-icons/fa';
 import { useApp } from '../context/AppContext';
+import { supabase } from '../lib/supabase';
 import Button from '../components/ui/Button';
 import FormInput from '../components/ui/FormInput';
 import Card from '../components/ui/Card';
@@ -16,9 +17,21 @@ const Login = () => {
   const [showPassword, setShowPassword] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [showForgotPassword, setShowForgotPassword] = useState(false);
+  const [infoMessage, setInfoMessage] = useState('');
   
   const { login, state } = useApp();
   const navigate = useNavigate();
+  const location = useLocation();
+
+  // Handle state from verification page
+  useEffect(() => {
+    if (location.state?.email) {
+      setFormData(prev => ({ ...prev, email: location.state.email }));
+    }
+    if (location.state?.message) {
+      setInfoMessage(location.state.message);
+    }
+  }, [location.state]);
 
   // Redirect if already logged in
   useEffect(() => {
@@ -65,10 +78,15 @@ const Login = () => {
       const result = await login(formData.email, formData.password);
       
       if (result.success) {
-        // Successfully logged in - navigation will be handled by the useEffect hook
+        // Navigation will be handled by the useEffect hook
         // when currentUser is updated in AppContext
       } else {
-        setErrors({ general: result.message });
+        if (result.needsVerification) {
+          // Redirect to email verification page
+          navigate('/verify-email', { state: { email: result.email }, replace: true });
+        } else {
+          setErrors({ general: result.message });
+        }
       }
     } catch (error) {
       console.error('Login error:', error);
@@ -98,6 +116,12 @@ const Login = () => {
         {/* Login Form */}
         <Card>
           <form onSubmit={handleSubmit} className="space-y-6">
+            {infoMessage && (
+              <div className="bg-blue-50 border border-blue-200 text-blue-700 px-4 py-3 rounded">
+                {infoMessage}
+              </div>
+            )}
+            
             {errors.general && (
               <div className="bg-red-50 border border-red-200 text-red-700 px-4 py-3 rounded">
                 {errors.general}

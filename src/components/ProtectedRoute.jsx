@@ -1,14 +1,47 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Navigate, useLocation } from 'react-router-dom';
 import { useApp } from '../context/AppContext';
+import { supabase } from '../lib/supabase';
 
 const ProtectedRoute = ({ children, adminOnly = false }) => {
   const { state } = useApp();
   const { currentUser, loading } = state;
   const location = useLocation();
+  const [checkingVerification, setCheckingVerification] = useState(true);
+  const [isEmailVerified, setIsEmailVerified] = useState(false);
 
-  // Show loading spinner while auth state is being determined
-  if (loading) {
+  // Check email verification status when component mounts or user changes
+  useEffect(() => {
+    const checkEmailVerification = async () => {
+      if (!currentUser) {
+        setCheckingVerification(false);
+        return;
+      }
+
+      try {
+        const { data: { user }, error } = await supabase.auth.getUser();
+        
+        if (error) {
+          console.error('Error checking email verification:', error);
+          setIsEmailVerified(false);
+        } else if (user && user.email_confirmed_at) {
+          setIsEmailVerified(true);
+        } else {
+          setIsEmailVerified(false);
+        }
+      } catch (error) {
+        console.error('Error in email verification check:', error);
+        setIsEmailVerified(false);
+      } finally {
+        setCheckingVerification(false);
+      }
+    };
+
+    checkEmailVerification();
+  }, [currentUser]);
+
+  // Show loading spinner while auth state or email verification is being determined
+  if (loading || checkingVerification) {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gray-50">
         <div className="text-center">
@@ -23,6 +56,12 @@ const ProtectedRoute = ({ children, adminOnly = false }) => {
     // Redirect to login page with return url
     return <Navigate to="/login" state={{ from: location }} replace />;
   }
+
+  // Temporarily disable automatic email verification check in ProtectedRoute
+  // The EmailVerification page will handle this check manually
+  // if (!isEmailVerified) {
+  //   return <Navigate to="/verify-email" state={{ email: currentUser.email }} replace />;
+  // }
 
   if (adminOnly && currentUser.userType !== 'admin') {
     // Redirect to user dashboard if not admin

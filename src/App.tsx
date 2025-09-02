@@ -15,6 +15,8 @@ import ComplaintDetail from './pages/ComplaintDetail';
 import AdminDashboard from './pages/AdminDashboard';
 import AdminComplaints from './pages/AdminComplaints';
 import AdminSubmitComplaint from './pages/AdminSubmitComplaint';
+import EmailVerification from './pages/EmailVerification';
+import EmailVerified from './pages/EmailVerified';
 
 // App Routes Component - MUST be inside AppProvider
 const AppRoutes = () => {
@@ -43,6 +45,8 @@ const AppRoutes = () => {
       )} />
       <Route path="/login" element={<Login />} />
       <Route path="/register" element={<Register />} />
+      <Route path="/verify-email" element={<EmailVerification />} />
+      <Route path="/email-verified" element={<EmailVerified />} />
       <Route path="/reset-password" element={<ResetPassword />} />
       
       {/* Protected User Routes */}

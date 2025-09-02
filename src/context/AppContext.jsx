@@ -125,12 +125,15 @@ export const AppProvider = ({ children }) => {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        console.log('Auth state change:', event, session?.user?.email);
+        console.log('Auth state change:', event, session?.user?.email, 'Email confirmed:', session?.user?.email_confirmed_at);
         
         if (event === 'SIGNED_IN' && session?.user) {
           await fetchUserProfile(session.user.id);
         } else if (event === 'SIGNED_OUT') {
           dispatch({ type: actionTypes.LOGOUT });
+        } else if (event === 'TOKEN_REFRESHED' && session?.user) {
+          // Handle token refresh - user might have verified email
+          await fetchUserProfile(session.user.id);
         }
       }
     );
@@ -268,10 +271,29 @@ export const AppProvider = ({ children }) => {
       });
 
       if (error) {
+        // Check if error is due to email not being confirmed
+        if (error.message.includes('Email not confirmed')) {
+          return { 
+            success: false, 
+            message: 'Please verify your email address before signing in. Check your inbox for a verification link.',
+            needsVerification: true,
+            email: email
+          };
+        }
         return { success: false, message: error.message };
       }
 
       if (data.user) {
+        // Check if email is verified
+        if (!data.user.email_confirmed_at) {
+          return { 
+            success: false, 
+            message: 'Please verify your email address before signing in. Check your inbox for a verification link.',
+            needsVerification: true,
+            email: data.user.email
+          };
+        }
+        
         // Fetch user profile and wait for it to complete
         await fetchUserProfile(data.user.id);
         return { success: true, user: data.user, needsRedirect: true };
@@ -390,12 +412,12 @@ export const AppProvider = ({ children }) => {
         };
       }
       
-      // Sign up user with Supabase Auth - disable email verification
+      // Sign up user with Supabase Auth - enable email verification
       const { data, error } = await supabase.auth.signUp({
         email: userData.email,
         password: userData.password,
         options: {
-          emailRedirectTo: undefined, // Disable email verification
+          emailRedirectTo: `${window.location.origin}/email-verified`, // Redirect to neutral success page
           data: {
             full_name: userData.fullName,
             role: userData.userType || USER_ROLES.USER,
@@ -412,34 +434,19 @@ export const AppProvider = ({ children }) => {
       }
 
       if (data.user) {
-        // Create profile in profiles table
-        const profileResult = await createUserProfile(data.user.id, userData);
-        
-        if (!profileResult.success) {
-          console.error('Profile creation failed, but auth user created. Continuing with fallback...');
-        }
-        
-        // Try to sign in the user immediately since email verification is disabled
-        const loginResult = await supabase.auth.signInWithPassword({
-          email: userData.email,
-          password: userData.password
+        // Create profile in profiles table (don't wait for it to complete)
+        createUserProfile(data.user.id, userData).catch(error => {
+          console.error('Profile creation failed, but auth user created:', error);
         });
         
-        if (loginResult.data.session) {
-          await fetchUserProfile(loginResult.data.user.id);
-          return { 
-            success: true, 
-            message: 'Registration successful! Welcome to the Traffic Management System.',
-            user: loginResult.data.user,
-            loggedIn: true
-          };
-        }
-        
-        // If immediate login fails, still consider registration successful
+        // With email verification enabled, user needs to verify email before logging in
         return { 
           success: true, 
-          message: 'Registration successful! Please login with your credentials.',
-          loggedIn: false
+          message: 'Registration successful! Please check your email to verify your account.',
+          user: data.user,
+          loggedIn: false,
+          needsVerification: true,
+          email: userData.email
         };
       }
     } catch (error) {

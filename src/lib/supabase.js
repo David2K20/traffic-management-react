@@ -11,8 +11,8 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
   auth: {
     autoRefreshToken: true,
     persistSession: true,
-    detectSessionInUrl: false, // Disable since we're not using email verification
-    flowType: 'implicit' // Use implicit flow to skip email verification
+    detectSessionInUrl: true, // Enable to handle email verification links
+    flowType: 'pkce' // Use PKCE flow for email verification
   }
 })
 
