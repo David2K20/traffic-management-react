@@ -7,20 +7,99 @@ import Badge from '../components/ui/Badge';
 import Button from '../components/ui/Button';
 import Loading from '../components/ui/Loading';
 import DocumentUpload from '../components/ui/DocumentUpload';
+import { formatDate, formatTime, getDaysUntilExpiry } from '../utils/dateUtils';
 
 const Dashboard = () => {
-  const { state, getComplaintsByUser, getComplaintsAgainstUser, getDocumentsByUser, fetchComplaints, fetchDocuments } = useApp();
+  const { state, getComplaintsByUser, getComplaintsAgainstUser, getDocumentsByUser, fetchComplaints, fetchDocuments, showError, showWarning, showSuccess } = useApp();
   const { currentUser, loading } = state;
   const [showDocumentUpload, setShowDocumentUpload] = useState(false);
   const [selectedDocumentType, setSelectedDocumentType] = useState(null);
+  const [selectedDocument, setSelectedDocument] = useState(null);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [dataError, setDataError] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [lastFetchTime, setLastFetchTime] = useState(null);
+  
+  // Fetch data with retry logic
+  const fetchDashboardData = async (isRetry = false, retryAttempt = 0) => {
+    if (!currentUser?.id) return;
+    
+    setDataLoading(true);
+    setDataError(null);
+    
+    try {
+      console.log(`Fetching dashboard data (attempt ${retryAttempt + 1})...`);
+      
+      // Set timeout for data fetching (30 seconds)
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Request timeout')), 30000);
+      });
+      
+      const fetchPromises = [
+        fetchComplaints(),
+        fetchDocuments(currentUser.id)
+      ];
+      
+      // Race between data fetching and timeout
+      await Promise.race([
+        Promise.allSettled(fetchPromises),
+        timeoutPromise
+      ]);
+      
+      setLastFetchTime(Date.now());
+      setRetryCount(0);
+      setDataError(null);
+      
+      if (isRetry) {
+        showWarning('Dashboard data refreshed successfully');
+      }
+      
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+      const errorMessage = error.message === 'Request timeout' 
+        ? 'Request timed out. Please check your connection.' 
+        : 'Failed to load dashboard data';
+      
+      setDataError(errorMessage);
+      
+      if (retryAttempt < 2) {
+        const retryDelay = Math.min(1000 * Math.pow(2, retryAttempt), 5000);
+        console.log(`Retrying dashboard data fetch in ${retryDelay}ms...`);
+        
+        setTimeout(() => {
+          fetchDashboardData(true, retryAttempt + 1);
+        }, retryDelay);
+      } else {
+        showError(errorMessage + '. Please try refreshing manually.');
+        setRetryCount(retryAttempt + 1);
+      }
+    } finally {
+      setDataLoading(false);
+    }
+  };
   
   // Fetch data when component mounts or user changes
   useEffect(() => {
-    if (currentUser) {
-      fetchComplaints();
-      fetchDocuments(currentUser.id);
+    if (currentUser?.id) {
+      console.log('Dashboard mounted with user, fetching data...');
+      fetchDashboardData();
     }
-  }, [currentUser]);
+  }, [currentUser?.id]); // Only depend on user ID, not the entire user object
+  
+  // Also fetch data when auth is restored (for refresh scenarios)
+  useEffect(() => {
+    const { isAuthRestored, authInitialized } = state;
+    if (isAuthRestored && authInitialized && currentUser?.id && state.complaints.length === 0) {
+      console.log('Auth restored but no data loaded, fetching dashboard data...');
+      fetchDashboardData();
+    }
+  }, [state.isAuthRestored, state.authInitialized, currentUser?.id, state.complaints.length]);
+  
+  // Manual refresh function
+  const handleManualRefresh = () => {
+    setRetryCount(0);
+    fetchDashboardData(true, 0);
+  };
   
   if (loading) {
     return (
@@ -47,13 +126,61 @@ const Dashboard = () => {
     const daysUntilExpiry = Math.ceil((expiry - today) / (1000 * 60 * 60 * 24));
     return daysUntilExpiry <= 30 && daysUntilExpiry > 0;
   });
+  
+  const rejectedDocuments = userDocuments.filter(doc => doc.status === 'Rejected');
+  const pendingDocuments = userDocuments.filter(doc => doc.status === 'Pending' || !doc.status);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
       {/* Welcome Section */}
       <div className="mb-8">
-        <h1 className="text-3xl font-bold text-gray-900">Welcome back, {currentUser?.fullName}!</h1>
-        <p className="text-gray-600 mt-2">Vehicle Plate: <span className="font-semibold">{currentUser?.vehiclePlate}</span></p>
+        <div className="flex items-center justify-between">
+          <div>
+            <h1 className="text-3xl font-bold text-gray-900">Welcome back, {currentUser?.fullName}!</h1>
+            <p className="text-gray-600 mt-2">Vehicle Plate: <span className="font-semibold">{currentUser?.vehiclePlate}</span></p>
+            {lastFetchTime && (
+              <p className="text-xs text-gray-500 mt-1">
+                Last updated: {formatTime(lastFetchTime)}
+              </p>
+            )}
+          </div>
+          <div className="flex items-center space-x-2">
+            {dataLoading && (
+              <div className="flex items-center text-blue-600">
+                <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-blue-600 mr-2"></div>
+                <span className="text-sm">Loading...</span>
+              </div>
+            )}
+            <Button 
+              onClick={handleManualRefresh} 
+              variant="outline" 
+              size="sm"
+              disabled={dataLoading}
+            >
+              Refresh
+            </Button>
+          </div>
+        </div>
+        
+        {/* Data Error Display */}
+        {dataError && retryCount > 2 && (
+          <div className="mt-4 p-3 bg-red-50 border border-red-200 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center">
+                <FaExclamationTriangle className="text-red-600 mr-2" />
+                <span className="text-sm text-red-800">{dataError}</span>
+              </div>
+              <Button 
+                onClick={handleManualRefresh} 
+                variant="outline" 
+                size="sm"
+                className="text-red-600 border-red-600 hover:bg-red-50"
+              >
+                Retry
+              </Button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Quick Actions */}
@@ -175,7 +302,7 @@ const Dashboard = () => {
                 <div className="mt-2 space-y-1">
                   {expiredDocuments.map(doc => (
                     <p key={doc.id} className="text-sm text-red-700">
-                      {doc.name} expired on {new Date(doc.expiryDate).toLocaleDateString()}
+                      {doc.name} expired on {formatDate(doc.expiryDate)}
                     </p>
                   ))}
                 </div>
@@ -204,6 +331,44 @@ const Dashboard = () => {
             </div>
           )}
 
+          {/* Rejected Documents */}
+          {rejectedDocuments.length > 0 && (
+            <div className="mb-4">
+              <div className="bg-red-50 border border-red-200 rounded-lg p-3">
+                <div className="flex items-center">
+                  <FaExclamationTriangle className="text-red-600 mr-2" />
+                  <span className="font-medium text-red-800">Documents Rejected</span>
+                </div>
+                <div className="mt-2 space-y-1">
+                  {rejectedDocuments.map(doc => (
+                    <p key={doc.id} className="text-sm text-red-700">
+                      {doc.name} was rejected - {doc.rejectionReason || 'Please contact admin'}
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Pending Documents */}
+          {pendingDocuments.length > 0 && (
+            <div className="mb-4">
+              <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                <div className="flex items-center">
+                  <FaBell className="text-blue-600 mr-2" />
+                  <span className="font-medium text-blue-800">Documents Under Review</span>
+                </div>
+                <div className="mt-2 space-y-1">
+                  {pendingDocuments.map(doc => (
+                    <p key={doc.id} className="text-sm text-blue-700">
+                      {doc.name} is being reviewed by our team
+                    </p>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
           {/* Complaints Against User */}
           {complaintsAgainstUser.length > 0 && (
             <div className="mb-4">
@@ -223,7 +388,7 @@ const Dashboard = () => {
             </div>
           )}
 
-          {expiredDocuments.length === 0 && expiringDocuments.length === 0 && complaintsAgainstUser.length === 0 && (
+          {expiredDocuments.length === 0 && expiringDocuments.length === 0 && complaintsAgainstUser.length === 0 && rejectedDocuments.length === 0 && pendingDocuments.length === 0 && (
             <p className="text-gray-600 text-center py-4">No notifications at this time</p>
           )}
         </Card>
@@ -248,14 +413,69 @@ const Dashboard = () => {
                 {doc ? (
                   <div>
                     <p className="text-sm text-gray-600 mb-2">
-                      Expires: {new Date(doc.expiryDate).toLocaleDateString()}
+                      Expires: {formatDate(doc.expiryDate)}
                     </p>
-                    <Badge 
-                      variant={isExpired ? 'rejected' : isExpiring ? 'pending' : 'resolved'}
-                      size="sm"
-                    >
-                      {isExpired ? 'Expired' : isExpiring ? 'Expiring Soon' : 'Valid'}
-                    </Badge>
+                    
+                    {/* Document Expiry Status */}
+                    <div className="mb-2">
+                      <Badge 
+                        variant={isExpired ? 'rejected' : isExpiring ? 'pending' : 'resolved'}
+                        size="sm"
+                      >
+                        {isExpired ? 'Expired' : isExpiring ? 'Expiring Soon' : 'Valid'}
+                      </Badge>
+                    </div>
+                    
+                    {/* Document Verification Status */}
+                    <div className="mb-2">
+                      <p className="text-xs text-gray-500 mb-1">Verification Status:</p>
+                      <div className="flex items-center space-x-2">
+                        <Badge 
+                          variant={
+                            doc.status === 'Approved' ? 'resolved' : 
+                            doc.status === 'Rejected' ? 'rejected' : 
+                            'pending'
+                          }
+                          size="sm"
+                        >
+                          {doc.status || 'Pending'}
+                        </Badge>
+                        
+                        {/* Re-upload button for rejected documents */}
+                        {doc.status === 'Rejected' && (
+                          <Button 
+                            variant="outline" 
+                            size="sm"
+                            className="text-blue-600 border-blue-600 hover:bg-blue-50 flex items-center"
+                            onClick={() => {
+                              setSelectedDocumentType(docType);
+                              setSelectedDocument(doc); // Pass the existing document
+                              setShowDocumentUpload(true);
+                            }}
+                            title="Upload new version"
+                          >
+                            <FaPlus className="mr-1" />
+                            Re-upload
+                          </Button>
+                        )}
+                      </div>
+                    </div>
+                    
+                    {/* Rejection Reason */}
+                    {doc.status === 'Rejected' && doc.rejectionReason && (
+                      <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
+                        <p className="text-xs text-red-600 font-medium mb-1">Reason for rejection:</p>
+                        <p className="text-xs text-red-700">{doc.rejectionReason}</p>
+                        <p className="text-xs text-blue-600 mt-1 font-medium">Upload a new version using the button above</p>
+                      </div>
+                    )}
+                    
+                    {/* Upload Date */}
+                    {doc.uploadDate && (
+                      <p className="text-xs text-gray-500 mt-2">
+                        Uploaded: {formatDate(doc.uploadDate)}
+                      </p>
+                    )}
                   </div>
                 ) : (
                   <div>
@@ -265,6 +485,7 @@ const Dashboard = () => {
                       size="sm"
                       onClick={() => {
                         setSelectedDocumentType(docType);
+                        setSelectedDocument(null); // No existing document for new uploads
                         setShowDocumentUpload(true);
                       }}
                     >
@@ -282,13 +503,21 @@ const Dashboard = () => {
       <DocumentUpload
         documentType={selectedDocumentType}
         isOpen={showDocumentUpload}
+        isReUpload={!!selectedDocument} // Pass true if we have an existing document
+        existingDocument={selectedDocument} // Pass the existing document for replacement
         onClose={() => {
           setShowDocumentUpload(false);
           setSelectedDocumentType(null);
+          setSelectedDocument(null);
         }}
         onSuccess={(document) => {
           // Refresh documents after successful upload
           fetchDocuments(currentUser.id);
+          
+          // Show additional feedback for replacements
+          if (selectedDocument) {
+            showSuccess('Document successfully replaced and sent for review!');
+          }
         }}
       />
     </div>

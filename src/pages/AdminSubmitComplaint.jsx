@@ -18,8 +18,11 @@ const AdminSubmitComplaint = () => {
   const [errors, setErrors] = useState({});
   const [isLoading, setIsLoading] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
+  const [selectedImageFile, setSelectedImageFile] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
   
-  const { addComplaint, state } = useApp();
+  const { addComplaint, showSuccess, showError, showWarning, fetchComplaints, state } = useApp();
   const { currentUser } = state;
   const navigate = useNavigate();
 
@@ -46,6 +49,7 @@ const AdminSubmitComplaint = () => {
   const handleImageChange = (e) => {
     const file = e.target.files[0];
     if (file) {
+      setSelectedImageFile(file);
       const reader = new FileReader();
       reader.onloadend = () => {
         setImagePreview(reader.result);
@@ -56,6 +60,7 @@ const AdminSubmitComplaint = () => {
 
   const removeImage = () => {
     setImagePreview(null);
+    setSelectedImageFile(null);
     document.getElementById('image').value = '';
   };
 
@@ -92,23 +97,84 @@ const AdminSubmitComplaint = () => {
     if (!validateForm()) return;
     
     setIsLoading(true);
+    setRetryCount(0);
+    setErrors({});
     
-    // Simulate API call delay
-    setTimeout(() => {
-      const complaintData = {
-        ...formData,
-        reportedBy: currentUser.id,
-        reportedByName: currentUser.fullName,
-        reportedByPlate: currentUser.badgeId || 'ADMIN',
-        submittedBy: 'admin',
-        image: imagePreview
-      };
-      
-      addComplaint(complaintData);
-      alert('Complaint submitted successfully!');
-      navigate('/admin/complaints');
-      setIsLoading(false);
-    }, 1000);
+    const attemptSubmission = async (attempt = 1) => {
+      try {
+        const complaintData = {
+          ...formData,
+          image: selectedImageFile // Use the file object directly
+        };
+        
+        const result = await Promise.race([
+          addComplaint(complaintData),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Submission timeout')), 45000)
+          )
+        ]);
+        
+        if (result.success) {
+          showSuccess('Official complaint submitted successfully!');
+          
+          // Auto-refresh complaints list
+          try {
+            await fetchComplaints();
+          } catch (refreshError) {
+            console.error('Error refreshing complaints:', refreshError);
+          }
+          
+          // Clear form
+          setFormData({
+            title: '',
+            description: '',
+            location: '',
+            category: '',
+            offenderPlate: '',
+            priority: 'medium'
+          });
+          setImagePreview(null);
+          setSelectedImageFile(null);
+          
+          // Navigate to complaints list
+          navigate('/admin/complaints');
+        } else {
+          throw new Error(result.message || 'Failed to submit complaint');
+        }
+      } catch (error) {
+        console.error(`Error submitting complaint (attempt ${attempt}):`, error);
+        
+        if (attempt < 3) {
+          // Retry with exponential backoff
+          const backoffTime = Math.min(2000 * Math.pow(2, attempt - 1), 8000);
+          setRetryCount(attempt);
+          setIsRetrying(true);
+          
+          showWarning(`Submission attempt failed. Retrying in ${backoffTime/1000} seconds...`);
+          
+          await new Promise(resolve => setTimeout(resolve, backoffTime));
+          return attemptSubmission(attempt + 1);
+        } else {
+          // All retry attempts failed
+          const errorMessage = 'Failed to submit after multiple attempts. Please try again later.';
+          showError(errorMessage);
+          setErrors({ general: errorMessage });
+          throw error;
+        }
+      } finally {
+        if (attempt === 3 || !isRetrying) {
+          setIsLoading(false);
+          setIsRetrying(false);
+        }
+      }
+    };
+    
+    try {
+      await attemptSubmission();
+    } catch (error) {
+      // Final error already handled in the attemptSubmission function
+      console.error('Submission ultimately failed:', error);
+    }
   };
 
   return (
@@ -258,10 +324,19 @@ const AdminSubmitComplaint = () => {
             </Button>
             <Button
               type="submit"
-              className="flex-1"
+              className="flex-1 flex items-center justify-center"
               disabled={isLoading}
             >
-              {isLoading ? 'Submitting...' : 'Submit Official Complaint'}
+              {isLoading && (
+                <svg className="animate-spin -ml-1 mr-2 h-4 w-4 text-white" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              )}
+              {isLoading 
+                ? (isRetrying ? `Retrying (${retryCount}/3)...` : 'Submitting...')
+                : 'Submit Official Complaint'
+              }
             </Button>
           </div>
         </form>

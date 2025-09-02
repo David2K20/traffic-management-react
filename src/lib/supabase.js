@@ -29,6 +29,13 @@ export const DOCUMENT_TYPES = {
   INSURANCE: 'insurance'
 }
 
+// Document status
+export const DOCUMENT_STATUS = {
+  PENDING: 'pending',
+  APPROVED: 'approved',
+  REJECTED: 'rejected'
+}
+
 // User roles
 export const USER_ROLES = {
   USER: 'user',

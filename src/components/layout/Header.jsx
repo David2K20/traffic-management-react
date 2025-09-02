@@ -1,19 +1,26 @@
 import React, { useState } from 'react';
 import { Link, useNavigate, useLocation } from 'react-router-dom';
-import { FaCar, FaUser, FaSignOutAlt, FaBars, FaTimes } from 'react-icons/fa';
+import { FaCar, FaUser, FaSignOutAlt, FaBars, FaTimes, FaSync } from 'react-icons/fa';
 import { useApp } from '../../context/AppContext';
 import Button from '../ui/Button';
 
 const Header = () => {
   const { state, logout } = useApp();
-  const { currentUser } = state;
+  const { currentUser, profileLoading } = state;
   const navigate = useNavigate();
   const location = useLocation();
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  const handleLogout = () => {
-    logout();
-    navigate('/login');
+  const handleLogout = async () => {
+    try {
+      console.log('Header: Initiating logout...');
+      const result = await logout();
+      console.log('Header: Logout result:', result);
+      // Logout function now handles redirect automatically
+    } catch (error) {
+      console.error('Header: Error during logout:', error);
+      // Logout function handles redirect even on error
+    }
   };
 
   const toggleMobileMenu = () => {
@@ -85,6 +92,9 @@ const Header = () => {
                   <div className="flex items-center space-x-2">
                     <FaUser className="text-blue-400" />
                     <span className="text-sm">{currentUser.fullName}</span>
+                    {profileLoading && (
+                      <FaSync className="text-blue-400 text-xs animate-spin" title="Updating profile..." />
+                    )}
                   </div>
                   <Button 
                     variant="ghost" 
@@ -137,6 +147,9 @@ const Header = () => {
                   <div className="flex items-center space-x-2 px-2 py-1 bg-gray-800 rounded">
                     <FaUser className="text-blue-400" />
                     <span className="text-sm">{currentUser.fullName}</span>
+                    {profileLoading && (
+                      <FaSync className="text-blue-400 text-xs animate-spin" title="Updating profile..." />
+                    )}
                   </div>
                   
                   {currentUser.userType === 'admin' ? (

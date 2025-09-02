@@ -19,8 +19,10 @@ const SubmitComplaint = () => {
   const [isLoading, setIsLoading] = useState(false);
   const [imagePreview, setImagePreview] = useState(null);
   const [selectedImageFile, setSelectedImageFile] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const [isRetrying, setIsRetrying] = useState(false);
   
-  const { addComplaint, state } = useApp();
+  const { addComplaint, showSuccess, showError, showWarning, fetchComplaints, state } = useApp();
   const { currentUser } = state;
   const navigate = useNavigate();
 
@@ -89,6 +91,53 @@ const SubmitComplaint = () => {
     return Object.keys(newErrors).length === 0;
   };
 
+  // Submit with timeout and retry logic
+  const submitWithRetry = async (complaintData, attempt = 0) => {
+    const maxRetries = 3;
+    const timeoutDuration = 45000; // 45 seconds for complaint submission
+    
+    try {
+      console.log(`Complaint submission attempt ${attempt + 1}...`);
+      
+      // Create timeout promise
+      const timeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          reject(new Error('Submission timeout - request took too long'));
+        }, timeoutDuration);
+      });
+      
+      // Race between submission and timeout
+      const result = await Promise.race([
+        addComplaint(complaintData),
+        timeoutPromise
+      ]);
+      
+      return result;
+    } catch (error) {
+      console.error(`Submission attempt ${attempt + 1} failed:`, error);
+      
+      if (attempt < maxRetries && !error.message?.includes('timeout')) {
+        const retryDelay = Math.min(2000 * Math.pow(2, attempt), 8000); // Max 8s delay
+        console.log(`Retrying submission in ${retryDelay}ms...`);
+        
+        setIsRetrying(true);
+        setRetryCount(attempt + 1);
+        showWarning(`Submission failed, retrying in ${Math.ceil(retryDelay/1000)} seconds...`);
+        
+        await new Promise(resolve => setTimeout(resolve, retryDelay));
+        setIsRetrying(false);
+        
+        return submitWithRetry(complaintData, attempt + 1);
+      } else {
+        // Max retries reached or timeout
+        const errorMessage = error.message?.includes('timeout') 
+          ? 'Submission timed out. Please check your connection and try again.'
+          : error.message || 'Submission failed after multiple attempts.';
+        throw new Error(errorMessage);
+      }
+    }
+  };
+
   const handleSubmit = async (e) => {
     e.preventDefault();
     
@@ -96,6 +145,7 @@ const SubmitComplaint = () => {
     
     setIsLoading(true);
     setErrors({});
+    setRetryCount(0);
     
     try {
       const complaintData = {
@@ -103,19 +153,45 @@ const SubmitComplaint = () => {
         image: selectedImageFile // Use the file object directly
       };
       
-      const result = await addComplaint(complaintData);
+      const result = await submitWithRetry(complaintData);
       
       if (result.success) {
-        alert('Complaint submitted successfully!');
+        showSuccess('Complaint submitted successfully!');
+        
+        // Auto-refresh complaints list
+        try {
+          await fetchComplaints();
+        } catch (refreshError) {
+          console.error('Error refreshing complaints:', refreshError);
+        }
+        
+        // Clear form
+        setFormData({
+          title: '',
+          description: '',
+          location: '',
+          category: '',
+          offenderPlate: '',
+          priority: 'low'
+        });
+        setImagePreview(null);
+        setSelectedImageFile(null);
+        setRetryCount(0);
+        
+        // Navigate to complaints list
         navigate('/my-complaints');
       } else {
+        showError(result.message || 'Failed to submit complaint');
         setErrors({ general: result.message });
       }
     } catch (error) {
       console.error('Error submitting complaint:', error);
-      setErrors({ general: 'An error occurred while submitting the complaint. Please try again.' });
+      showError(error.message || 'Submission failed. Please try again.');
+      setErrors({ general: error.message || 'Submission failed. Please try again.' });
     } finally {
       setIsLoading(false);
+      setIsRetrying(false);
+      setRetryCount(0);
     }
   };
 
@@ -261,7 +337,14 @@ const SubmitComplaint = () => {
               className="flex-1"
               disabled={isLoading}
             >
-              {isLoading ? 'Submitting...' : 'Submit Complaint'}
+              {isLoading ? (
+                <div className="flex items-center justify-center">
+                  <div className="animate-spin rounded-full h-4 w-4 border-b-2 border-white mr-2"></div>
+                  {isRetrying ? `Retrying (${retryCount}/3)...` : 'Submitting...'}
+                </div>
+              ) : (
+                'Submit Complaint'
+              )}
             </Button>
           </div>
         </form>

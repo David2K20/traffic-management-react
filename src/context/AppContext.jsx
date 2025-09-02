@@ -1,28 +1,109 @@
 import React, { createContext, useContext, useReducer, useEffect } from 'react';
-import { supabase, USER_ROLES, COMPLAINT_STATUS, COMPLAINT_PRIORITY, STORAGE_BUCKETS } from '../lib/supabase';
+import { supabase, USER_ROLES, COMPLAINT_STATUS, COMPLAINT_PRIORITY, STORAGE_BUCKETS, DOCUMENT_STATUS } from '../lib/supabase';
 import { createStorageBuckets } from '../utils/createStorageBuckets';
+import { setupStoragePolicies } from '../utils/setupStoragePolicies';
+import { setupDatabasePolicies, printDatabasePolicyInstructions } from '../utils/setupDatabasePolicies';
 
 const AppContext = createContext();
 
-// Initial state - now empty, will be populated from Supabase
-const initialState = {
-  currentUser: null,
-  loading: true,
-  complaints: [],
-  documents: [],
-  authLoading: false
+// Local storage keys
+const STORAGE_KEYS = {
+  USER_PROFILE: 'traffic_app_user_profile',
+  AUTH_STATE: 'traffic_app_auth_state'
 };
+
+// Helper functions for localStorage
+const getStoredUserProfile = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.USER_PROFILE);
+    return stored ? JSON.parse(stored) : null;
+  } catch (error) {
+    console.error('Error reading stored user profile:', error);
+    return null;
+  }
+};
+
+const setStoredUserProfile = (userProfile) => {
+  try {
+    if (userProfile) {
+      localStorage.setItem(STORAGE_KEYS.USER_PROFILE, JSON.stringify(userProfile));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.USER_PROFILE);
+    }
+  } catch (error) {
+    console.error('Error storing user profile:', error);
+  }
+};
+
+const getStoredAuthState = () => {
+  try {
+    const stored = localStorage.getItem(STORAGE_KEYS.AUTH_STATE);
+    return stored ? JSON.parse(stored) : null;
+  } catch (error) {
+    console.error('Error reading stored auth state:', error);
+    return null;
+  }
+};
+
+const setStoredAuthState = (authState) => {
+  try {
+    if (authState) {
+      localStorage.setItem(STORAGE_KEYS.AUTH_STATE, JSON.stringify(authState));
+    } else {
+      localStorage.removeItem(STORAGE_KEYS.AUTH_STATE);
+    }
+  } catch (error) {
+    console.error('Error storing auth state:', error);
+  }
+};
+
+// Initial state - check localStorage first for faster loading
+const getInitialState = () => {
+  const storedProfile = getStoredUserProfile();
+  const storedAuthState = getStoredAuthState();
+  
+  // Check if cached data is recent (less than 30 minutes)
+  const isRecentCache = storedAuthState && 
+    (Date.now() - storedAuthState.timestamp) < (30 * 60 * 1000);
+  
+  return {
+    currentUser: isRecentCache ? storedProfile : null,
+    loading: false, // Start with false, will be set to true if needed
+    complaints: [],
+    documents: [],
+    toasts: [],
+    authLoading: false,
+    profileLoading: false,
+    isAuthRestored: isRecentCache, // If we have recent cache, consider auth restored immediately
+    sessionCheckComplete: false, // Track if initial session check is done
+    authInitialized: false, // Track if auth initialization is complete
+    loadingTimeout: false, // Track if loading has timed out
+    backgroundRefreshing: false, // Track background profile refresh
+    profileFetchRetries: 0,
+    maxRetries: 3
+  };
+};
+
+const initialState = getInitialState();
 
 // Action types
 const actionTypes = {
   SET_USER: 'SET_USER',
   SET_LOADING: 'SET_LOADING',
   SET_AUTH_LOADING: 'SET_AUTH_LOADING',
+  SET_PROFILE_LOADING: 'SET_PROFILE_LOADING',
+  SET_AUTH_RESTORED: 'SET_AUTH_RESTORED',
+  SET_SESSION_CHECK_COMPLETE: 'SET_SESSION_CHECK_COMPLETE',
+  SET_AUTH_INITIALIZED: 'SET_AUTH_INITIALIZED',
+  SET_LOADING_TIMEOUT: 'SET_LOADING_TIMEOUT',
+  SET_BACKGROUND_REFRESHING: 'SET_BACKGROUND_REFRESHING',
   SET_COMPLAINTS: 'SET_COMPLAINTS',
   ADD_COMPLAINT: 'ADD_COMPLAINT',
   UPDATE_COMPLAINT: 'UPDATE_COMPLAINT',
   SET_DOCUMENTS: 'SET_DOCUMENTS',
   ADD_DOCUMENT: 'ADD_DOCUMENT',
+  ADD_TOAST: 'ADD_TOAST',
+  REMOVE_TOAST: 'REMOVE_TOAST',
   LOGOUT: 'LOGOUT'
 };
 
@@ -30,10 +111,13 @@ const actionTypes = {
 const appReducer = (state, action) => {
   switch (action.type) {
     case actionTypes.SET_USER:
+      // Persist user profile to localStorage
+      setStoredUserProfile(action.payload);
       return {
         ...state,
         currentUser: action.payload,
-        loading: false
+        loading: false,
+        profileLoading: false
       };
     
     case actionTypes.SET_LOADING:
@@ -46,6 +130,42 @@ const appReducer = (state, action) => {
       return {
         ...state,
         authLoading: action.payload
+      };
+      
+    case actionTypes.SET_PROFILE_LOADING:
+      return {
+        ...state,
+        profileLoading: action.payload
+      };
+      
+    case actionTypes.SET_AUTH_RESTORED:
+      return {
+        ...state,
+        isAuthRestored: action.payload
+      };
+      
+    case actionTypes.SET_SESSION_CHECK_COMPLETE:
+      return {
+        ...state,
+        sessionCheckComplete: action.payload
+      };
+      
+    case actionTypes.SET_AUTH_INITIALIZED:
+      return {
+        ...state,
+        authInitialized: action.payload
+      };
+      
+    case actionTypes.SET_LOADING_TIMEOUT:
+      return {
+        ...state,
+        loadingTimeout: action.payload
+      };
+      
+    case actionTypes.SET_BACKGROUND_REFRESHING:
+      return {
+        ...state,
+        backgroundRefreshing: action.payload
       };
     
     case actionTypes.SET_COMPLAINTS:
@@ -82,12 +202,37 @@ const appReducer = (state, action) => {
         documents: [...state.documents, action.payload]
       };
     
-    case actionTypes.LOGOUT:
+    case actionTypes.ADD_TOAST:
       return {
         ...state,
+        toasts: [...state.toasts, action.payload]
+      };
+    
+    case actionTypes.REMOVE_TOAST:
+      return {
+        ...state,
+        toasts: state.toasts.filter(toast => toast.id !== action.payload)
+      };
+    
+    case actionTypes.LOGOUT:
+      // Clear localStorage on logout
+      setStoredUserProfile(null);
+      setStoredAuthState(null);
+      return {
         currentUser: null,
+        loading: false,
         complaints: [],
-        documents: []
+        documents: [],
+        toasts: [], // Clear toasts on logout
+        authLoading: false,
+        profileLoading: false,
+        isAuthRestored: true, // Keep this true so we don't show loading screens
+        sessionCheckComplete: true,
+        authInitialized: true,
+        loadingTimeout: false,
+        backgroundRefreshing: false,
+        profileFetchRetries: 0,
+        maxRetries: 3
       };
     
     default:
@@ -101,22 +246,153 @@ export const AppProvider = ({ children }) => {
 
   // Initialize auth session and user profile
   useEffect(() => {
+    let isMounted = true;
+    let initializationStarted = false;
+    let timeoutId = null;
+    
     const initializeAuth = async () => {
+      // Prevent duplicate initialization
+      if (initializationStarted) {
+        console.log('Authentication initialization already in progress, skipping...');
+        return;
+      }
+      initializationStarted = true;
+      
       try {
-        // Initialize storage buckets first
-        await createStorageBuckets();
+        console.log('Initializing authentication...');
         
-        const { data: { session }, error } = await supabase.auth.getSession();
+        // Set a timeout to prevent infinite loading (5 seconds)
+        timeoutId = setTimeout(() => {
+          if (isMounted) {
+            console.warn('Authentication initialization timeout - completing initialization');
+            dispatch({ type: actionTypes.SET_AUTH_INITIALIZED, payload: true });
+            dispatch({ type: actionTypes.SET_AUTH_RESTORED, payload: true });
+            dispatch({ type: actionTypes.SET_SESSION_CHECK_COMPLETE, payload: true });
+            
+            // If we have cached data, use it; otherwise stay logged out
+            const storedProfile = getStoredUserProfile();
+            const storedAuthState = getStoredAuthState();
+            const isRecentCache = storedAuthState && 
+              (Date.now() - storedAuthState.timestamp) < (30 * 60 * 1000);
+            
+            if (isRecentCache && storedProfile) {
+              console.log('Using cached profile due to timeout');
+              dispatch({ type: actionTypes.SET_USER, payload: storedProfile });
+            } else {
+              console.log('No valid cached data, staying logged out');
+              setStoredUserProfile(null);
+              setStoredAuthState(null);
+            }
+          }
+        }, 5000);
         
-        if (error) {
-          console.error('Error getting session:', error);
-        } else if (session?.user) {
-          await fetchUserProfile(session.user.id);
+        // Check for valid session
+        const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+        
+        // Clear the timeout since we got a response
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
         }
+        
+        if (isMounted) {
+          // Always mark initialization as complete
+          dispatch({ type: actionTypes.SET_SESSION_CHECK_COMPLETE, payload: true });
+          dispatch({ type: actionTypes.SET_AUTH_INITIALIZED, payload: true });
+          dispatch({ type: actionTypes.SET_AUTH_RESTORED, payload: true });
+        }
+        
+        if (sessionError) {
+          console.error('Session error:', sessionError);
+          // Clear any cached data and logout
+          setStoredUserProfile(null);
+          setStoredAuthState(null);
+          if (isMounted) {
+            dispatch({ type: actionTypes.LOGOUT });
+          }
+          return;
+        }
+        
+        if (session?.user) {
+          console.log('Valid session found for user:', session.user.email);
+          
+          // Update auth state timestamp
+          setStoredAuthState({
+            userId: session.user.id,
+            email: session.user.email,
+            timestamp: Date.now()
+          });
+          
+          if (isMounted) {
+            // Check if we have recent cached profile data
+            const storedProfile = getStoredUserProfile();
+            const storedAuthState = getStoredAuthState();
+            const isRecentCache = storedAuthState && 
+              (Date.now() - storedAuthState.timestamp) < (5 * 60 * 1000) &&
+              storedAuthState.userId === session.user.id;
+            
+            if (isRecentCache && storedProfile) {
+              console.log('Using cached profile for immediate display');
+              dispatch({ type: actionTypes.SET_USER, payload: storedProfile });
+              // Refresh profile in background
+              setTimeout(() => {
+                if (isMounted) {
+                  fetchUserProfile(session.user.id, true).catch(console.error);
+                }
+              }, 100);
+            } else {
+              console.log('Fetching fresh profile data');
+              await fetchUserProfile(session.user.id, false);
+            }
+          }
+        } else {
+          console.log('No valid session found');
+          // Clear any cached data
+          setStoredUserProfile(null);
+          setStoredAuthState(null);
+          if (isMounted) {
+            dispatch({ type: actionTypes.LOGOUT });
+          }
+        }
+        
+        // Initialize storage and policies in background (non-blocking)
+        setTimeout(() => {
+          Promise.all([
+            createStorageBuckets().catch(error => 
+              console.warn('Storage bucket setup failed:', error)
+            ),
+            setupStoragePolicies().catch(error => 
+              console.warn('Storage policy setup failed:', error)
+            ),
+            setupDatabasePolicies().catch(error => {
+              console.warn('Database policy setup failed:', error);
+              printDatabasePolicyInstructions();
+            })
+          ]).catch(error => {
+            console.warn('Background setup failed:', error);
+          });
+        }, 1000);
+        
       } catch (error) {
         console.error('Error initializing auth:', error);
-      } finally {
-        dispatch({ type: actionTypes.SET_LOADING, payload: false });
+        
+        // Clear timeout on error
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        
+        if (isMounted) {
+          // Always complete initialization even on error
+          dispatch({ type: actionTypes.SET_AUTH_RESTORED, payload: true });
+          dispatch({ type: actionTypes.SET_SESSION_CHECK_COMPLETE, payload: true });
+          dispatch({ type: actionTypes.SET_AUTH_INITIALIZED, payload: true });
+          
+          // Clear any potentially invalid cached data
+          setStoredUserProfile(null);
+          setStoredAuthState(null);
+          dispatch({ type: actionTypes.LOGOUT });
+        }
       }
     };
 
@@ -125,26 +401,96 @@ export const AppProvider = ({ children }) => {
     // Listen for auth changes
     const { data: { subscription } } = supabase.auth.onAuthStateChange(
       async (event, session) => {
-        console.log('Auth state change:', event, session?.user?.email, 'Email confirmed:', session?.user?.email_confirmed_at);
+        console.log('Auth state change:', event, session?.user?.email || 'no user', 'Email confirmed:', session?.user?.email_confirmed_at || 'n/a');
+        
+        if (!isMounted) return;
         
         if (event === 'SIGNED_IN' && session?.user) {
-          await fetchUserProfile(session.user.id);
-        } else if (event === 'SIGNED_OUT') {
+          console.log('User signed in, setting auth state and fetching profile');
+          setStoredAuthState({
+            userId: session.user.id,
+            email: session.user.email,
+            timestamp: Date.now()
+          });
+          await fetchUserProfile(session.user.id, true);
+        } else if (event === 'SIGNED_OUT' || (!session && event !== 'INITIAL_SESSION')) {
+          console.log('User signed out or session ended, clearing all state');
+          // Clear all stored data immediately
+          setStoredUserProfile(null);
+          setStoredAuthState(null);
+          // Clear app state
           dispatch({ type: actionTypes.LOGOUT });
         } else if (event === 'TOKEN_REFRESHED' && session?.user) {
-          // Handle token refresh - user might have verified email
-          await fetchUserProfile(session.user.id);
+          console.log('Token refreshed, updating auth state');
+          // Handle token refresh - update stored auth state timestamp
+          const newAuthState = {
+            userId: session.user.id,
+            email: session.user.email,
+            timestamp: Date.now()
+          };
+          setStoredAuthState(newAuthState);
+          
+          // Optionally refresh profile if it's been a while
+          const currentStoredState = getStoredAuthState();
+          const lastFetch = currentStoredState?.timestamp;
+          const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+          if (!lastFetch || lastFetch < fiveMinutesAgo) {
+            await fetchUserProfile(session.user.id, true);
+          }
+        } else if (event === 'INITIAL_SESSION' && !session) {
+          console.log('Initial session check - no session found');
+          // Only clear state if we have stale cached data
+          const storedProfile = getStoredUserProfile();
+          const storedAuthState = getStoredAuthState();
+          if (storedProfile || storedAuthState) {
+            console.log('Clearing stale cached data');
+            setStoredUserProfile(null);
+            setStoredAuthState(null);
+            dispatch({ type: actionTypes.LOGOUT });
+          }
         }
       }
     );
 
-    return () => subscription.unsubscribe();
+    return () => {
+      isMounted = false;
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+      subscription.unsubscribe();
+    };
   }, []);
 
   // Fetch user profile from database
-  const fetchUserProfile = async (userId) => {
+  const fetchUserProfile = async (userId, forceRefresh = false) => {
     try {
-      console.log('Fetching user profile for ID:', userId);
+      console.log('Fetching user profile for ID:', userId, forceRefresh ? '(forced refresh)' : '');
+      
+      // If not forcing refresh and we have a valid cached profile, use it
+      if (!forceRefresh) {
+        const storedProfile = getStoredUserProfile();
+        const storedAuthState = getStoredAuthState();
+        
+        if (storedProfile && storedAuthState && storedAuthState.userId === userId) {
+          // Check if cached data is recent (less than 5 minutes old)
+          const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
+          if (storedAuthState.timestamp > fiveMinutesAgo) {
+            console.log('Using recent cached profile');
+            dispatch({ type: actionTypes.SET_USER, payload: storedProfile });
+            
+            // Still fetch user data in background
+            fetchUserData(userId).catch(error => {
+              console.error('Background user data fetch failed:', error);
+            });
+            return;
+          }
+        }
+      }
+      
+      // Set profile loading state only if we don't have cached data
+      if (!state.currentUser || forceRefresh) {
+        dispatch({ type: actionTypes.SET_PROFILE_LOADING, payload: true });
+      }
       
       const { data: profile, error } = await supabase
         .from('profiles')
@@ -165,7 +511,10 @@ export const AppProvider = ({ children }) => {
         const fallbackProfile = await createFallbackProfile(userId);
         if (fallbackProfile) {
           dispatch({ type: actionTypes.SET_USER, payload: fallbackProfile });
-          // Skip fetchUserData for fallback profiles to avoid additional database errors
+          // Still try to fetch user data for fallback profiles, but don't block on errors
+          fetchUserData(userId).catch(error => {
+            console.error('User data fetch failed for fallback profile:', error);
+          });
         }
         return;
       }
@@ -180,10 +529,15 @@ export const AppProvider = ({ children }) => {
           vehiclePlate: profile.vehicle_plate || profile.plate_number,
           badgeId: profile.badge_id,
           department: profile.department,
-          userType: profile.role
+          userType: profile.role,
+          lastUpdated: Date.now() // Add timestamp for cache validation
         };
         dispatch({ type: actionTypes.SET_USER, payload: userProfile });
-        await fetchUserData(userId);
+        
+        // Fetch user data in background
+        fetchUserData(userId).catch(error => {
+          console.error('User data fetch failed:', error);
+        });
       } else {
         console.log('No profile found, creating fallback');
         const fallbackProfile = await createFallbackProfile(userId);
@@ -194,11 +548,15 @@ export const AppProvider = ({ children }) => {
     } catch (error) {
       console.error('Error in fetchUserProfile:', error);
       
-      // Create fallback profile on any error
-      const fallbackProfile = await createFallbackProfile(userId);
-      if (fallbackProfile) {
-        dispatch({ type: actionTypes.SET_USER, payload: fallbackProfile });
+      // Only try fallback if we don't have any cached profile
+      if (!state.currentUser) {
+        const fallbackProfile = await createFallbackProfile(userId);
+        if (fallbackProfile) {
+          dispatch({ type: actionTypes.SET_USER, payload: fallbackProfile });
+        }
       }
+    } finally {
+      dispatch({ type: actionTypes.SET_PROFILE_LOADING, payload: false });
     }
   };
 
@@ -207,7 +565,15 @@ export const AppProvider = ({ children }) => {
     try {
       console.log('Creating fallback profile for user:', userId);
       
-      // Get current user from auth
+      // First check if we have an active session
+      const { data: { session }, error: sessionError } = await supabase.auth.getSession();
+      
+      if (sessionError || !session) {
+        console.log('No active session, cannot create fallback profile');
+        return null;
+      }
+      
+      // Get current user from auth only if we have a session
       const { data: { user }, error: authError } = await supabase.auth.getUser();
       
       if (authError || !user) {
@@ -238,25 +604,35 @@ export const AppProvider = ({ children }) => {
 
   // Fetch user-specific data (complaints and documents)
   const fetchUserData = async (userId) => {
+    if (!userId) {
+      console.warn('No userId provided to fetchUserData');
+      return;
+    }
+    
+    console.log('Fetching user data for:', userId);
+    
     try {
-      // Fetch complaints (non-blocking)
-      try {
-        await fetchComplaints();
-      } catch (error) {
-        console.error('Error fetching complaints:', error);
-        // Don't block user login if complaints can't be fetched
-      }
+      // Fetch complaints and documents in parallel with better error handling
+      const results = await Promise.allSettled([
+        fetchComplaints(),
+        fetchDocuments(userId)
+      ]);
       
-      // Fetch documents (non-blocking)
-      try {
-        await fetchDocuments(userId);
-      } catch (error) {
-        console.error('Error fetching documents:', error);
-        // Don't block user login if documents can't be fetched
-      }
+      // Log results for debugging
+      results.forEach((result, index) => {
+        const operation = index === 0 ? 'complaints' : 'documents';
+        if (result.status === 'rejected') {
+          console.error(`Error fetching ${operation}:`, result.reason);
+        } else {
+          console.log(`Successfully fetched ${operation}`);
+        }
+      });
+      
+      // Even if some operations failed, don't throw - authentication should succeed
+      console.log('User data fetch completed (some operations may have failed)');
     } catch (error) {
-      console.error('Error fetching user data:', error);
-      // Don't block authentication even if data fetching fails
+      console.error('Unexpected error in fetchUserData:', error);
+      // Don't block authentication even if data fetching fails completely
     }
   };
 
@@ -308,10 +684,34 @@ export const AppProvider = ({ children }) => {
 
   const logout = async () => {
     try {
-      await supabase.auth.signOut();
+      console.log('Logging out user...');
+      
+      // Clear localStorage immediately
+      setStoredUserProfile(null);
+      setStoredAuthState(null);
+      
+      // Clear app state immediately
       dispatch({ type: actionTypes.LOGOUT });
+      
+      // Sign out from Supabase in the background
+      supabase.auth.signOut().catch(error => {
+        console.error('Supabase signOut error:', error);
+        // Don't block logout even if Supabase signOut fails
+      });
+      
+      // Immediately redirect to login page
+      window.location.href = '/login';
+      
+      return { success: true };
     } catch (error) {
       console.error('Logout error:', error);
+      // Ensure we still clear local state even if there's an error
+      setStoredUserProfile(null);
+      setStoredAuthState(null);
+      dispatch({ type: actionTypes.LOGOUT });
+      // Still redirect to login even on error
+      window.location.href = '/login';
+      return { success: false, message: 'An error occurred during logout, but you have been logged out locally' };
     }
   };
 
@@ -632,7 +1032,11 @@ export const AppProvider = ({ children }) => {
         fileName: doc.file_name,
         expiryDate: doc.expiry_date,
         uploadDate: doc.created_at?.split('T')[0],
-        fileUrl: doc.file_url
+        fileUrl: doc.file_url,
+        status: doc.status || DOCUMENT_STATUS.APPROVED, // Default to approved for existing docs
+        rejectionReason: doc.rejection_reason,
+        reviewedAt: doc.reviewed_at,
+        reviewedBy: doc.reviewed_by
       }));
 
       dispatch({ type: actionTypes.SET_DOCUMENTS, payload: transformedDocuments });
@@ -641,79 +1045,193 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  const addDocument = async (documentData) => {
+  const addDocument = async (documentData, isReplacement = false) => {
     try {
       let fileUrl = null;
 
       // Upload document file
       if (documentData.file) {
-        fileUrl = await uploadDocumentFile(documentData.file, documentData.type);
+        try {
+          fileUrl = await uploadDocumentFile(documentData.file, documentData.type);
+        } catch (uploadError) {
+          console.error('Document upload failed:', uploadError);
+          return { 
+            success: false, 
+            message: uploadError.message || 'Error uploading document file'
+          };
+        }
+        
         if (!fileUrl) {
-          return { success: false, message: 'Error uploading document file' };
+          return { success: false, message: 'Failed to get file URL after upload' };
         }
       }
 
-      const { data, error } = await supabase
-        .from('documents')
-        .insert({
+      // Check if we're replacing an existing document
+      const existingDoc = state.documents.find(doc => 
+        doc.userId === state.currentUser?.id && doc.type === documentData.type
+      );
+
+      if (existingDoc && isReplacement) {
+        // Update existing document instead of creating new one
+        const updateData = {
+          file_name: documentData.fileName,
+          file_url: fileUrl,
+          expiry_date: documentData.expiryDate,
+          status: DOCUMENT_STATUS.PENDING, // Reset to pending for review
+          rejection_reason: null, // Clear rejection reason
+          reviewed_at: null, // Clear review timestamp
+          reviewed_by: null, // Clear reviewer
+          updated_at: new Date().toISOString()
+        };
+
+        const { data, error } = await supabase
+          .from('documents')
+          .update(updateData)
+          .eq('id', existingDoc.id)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('Error updating document:', error);
+          return { success: false, message: `Database error: ${error.message}` };
+        }
+
+        const updatedDocument = {
+          id: data.id,
+          userId: data.user_id,
+          name: documentData.name,
+          type: data.document_type,
+          fileName: data.file_name,
+          expiryDate: data.expiry_date,
+          uploadDate: data.created_at?.split('T')[0],
+          fileUrl: data.file_url,
+          status: data.status || DOCUMENT_STATUS.PENDING,
+          rejectionReason: data.rejection_reason,
+          reviewedAt: data.reviewed_at,
+          reviewedBy: data.reviewed_by
+        };
+
+        // Update document in state
+        dispatch({ 
+          type: actionTypes.SET_DOCUMENTS, 
+          payload: state.documents.map(doc => 
+            doc.id === existingDoc.id ? updatedDocument : doc
+          )
+        });
+        
+        return { success: true, document: updatedDocument, isReplacement: true };
+      } else {
+        // Create new document
+        const documentInsertData = {
           user_id: state.currentUser?.id,
           document_type: documentData.type,
           file_name: documentData.fileName,
           file_url: fileUrl,
           expiry_date: documentData.expiryDate
-        })
-        .select()
-        .single();
+        };
+        
+        // Try to add status field, but handle gracefully if column doesn't exist
+        try {
+          documentInsertData.status = DOCUMENT_STATUS.PENDING;
+        } catch (error) {
+          console.log('Status column may not exist yet, proceeding without it');
+        }
 
-      if (error) {
-        console.error('Error adding document:', error);
-        return { success: false, message: error.message };
+        const { data, error } = await supabase
+          .from('documents')
+          .insert(documentInsertData)
+          .select()
+          .single();
+
+        if (error) {
+          console.error('Error adding document to database:', error);
+          return { success: false, message: `Database error: ${error.message}` };
+        }
+
+        const newDocument = {
+          id: data.id,
+          userId: data.user_id,
+          name: documentData.name,
+          type: data.document_type,
+          fileName: data.file_name,
+          expiryDate: data.expiry_date,
+          uploadDate: data.created_at?.split('T')[0],
+          fileUrl: data.file_url,
+          status: data.status || DOCUMENT_STATUS.PENDING,
+          rejectionReason: data.rejection_reason,
+          reviewedAt: data.reviewed_at,
+          reviewedBy: data.reviewed_by
+        };
+
+        dispatch({ type: actionTypes.ADD_DOCUMENT, payload: newDocument });
+        return { success: true, document: newDocument, isReplacement: false };
       }
-
-      const newDocument = {
-        id: data.id,
-        userId: data.user_id,
-        name: documentData.name,
-        type: data.document_type,
-        fileName: data.file_name,
-        expiryDate: data.expiry_date,
-        uploadDate: data.created_at?.split('T')[0],
-        fileUrl: data.file_url
-      };
-
-      dispatch({ type: actionTypes.ADD_DOCUMENT, payload: newDocument });
-      return { success: true, document: newDocument };
     } catch (error) {
       console.error('Error in addDocument:', error);
-      return { success: false, message: 'An error occurred while uploading the document' };
+      return { 
+        success: false, 
+        message: error.message || 'An error occurred while uploading the document'
+      };
     }
   };
 
   // Upload document file to Supabase Storage
   const uploadDocumentFile = async (file, documentType) => {
     try {
+      console.log('Uploading document file:', {
+        fileName: file.name,
+        fileSize: file.size,
+        documentType,
+        userId: state.currentUser?.id
+      });
+      
+      // Validate file before upload
+      if (!file || !state.currentUser?.id) {
+        console.error('Missing file or user ID for document upload');
+        throw new Error('Missing file or user authentication');
+      }
+      
       const fileExt = file.name.split('.').pop();
-      const fileName = `${documentType}_${Math.random()}.${fileExt}`;
-      const filePath = `${state.currentUser?.id}/${fileName}`;
+      const fileName = `${documentType}_${Date.now()}_${Math.random()}.${fileExt}`;
+      const filePath = `${state.currentUser.id}/${fileName}`;
+      
+      console.log('Uploading to path:', filePath);
 
       const { data, error } = await supabase.storage
         .from(STORAGE_BUCKETS.USER_DOCUMENTS)
-        .upload(filePath, file);
+        .upload(filePath, file, {
+          cacheControl: '3600',
+          upsert: false
+        });
 
       if (error) {
-        console.error('Error uploading document:', error);
-        return null;
+        console.error('Storage upload error:', error);
+        
+        // Provide more specific error messages
+        if (error.message?.includes('row-level security policy')) {
+          throw new Error('Storage permission error. Please contact support or try logging out and back in.');
+        } else if (error.message?.includes('file size')) {
+          throw new Error('File is too large. Please upload a file smaller than 50MB.');
+        } else if (error.message?.includes('file type')) {
+          throw new Error('File type not supported. Please upload PDF, JPG, or PNG files only.');
+        } else {
+          throw new Error(`Upload failed: ${error.message}`);
+        }
       }
+      
+      console.log('File uploaded successfully:', data);
 
       // Get public URL
       const { data: { publicUrl } } = supabase.storage
         .from(STORAGE_BUCKETS.USER_DOCUMENTS)
         .getPublicUrl(filePath);
-
+      
+      console.log('Public URL generated:', publicUrl);
       return publicUrl;
     } catch (error) {
       console.error('Error in uploadDocumentFile:', error);
-      return null;
+      // Re-throw the error with the specific message so addDocument can handle it
+      throw error;
     }
   };
 
@@ -728,6 +1246,115 @@ export const AppProvider = ({ children }) => {
 
   const getDocumentsByUser = (userId) => {
     return state.documents.filter(doc => doc.userId === userId);
+  };
+
+  // Admin document verification functions
+  const fetchAllDocuments = async () => {
+    try {
+      console.log('Fetching all documents for admin view...');
+      
+      // First, get all documents
+      const { data: documents, error: documentsError } = await supabase
+        .from('documents')
+        .select('*')
+        .order('created_at', { ascending: false });
+
+      if (documentsError) {
+        console.error('Error fetching documents:', documentsError);
+        return { success: false, message: documentsError.message };
+      }
+
+      console.log(`Found ${documents?.length || 0} documents in database`);
+
+      if (!documents || documents.length === 0) {
+        return { success: true, documents: [] };
+      }
+
+      // Get all unique user IDs from documents
+      const userIds = [...new Set(documents.map(doc => doc.user_id))];
+      console.log('Fetching profiles for user IDs:', userIds);
+      
+      // Fetch profiles for all users who have uploaded documents
+      const { data: profiles, error: profilesError } = await supabase
+        .from('profiles')
+        .select('id, full_name, vehicle_plate')
+        .in('id', userIds);
+
+      if (profilesError) {
+        console.error('Error fetching profiles:', profilesError);
+        // Continue with documents but no profile info
+      }
+
+      console.log(`Found ${profiles?.length || 0} matching profiles`);
+
+      // Create a lookup map for profiles
+      const profileMap = (profiles || []).reduce((map, profile) => {
+        map[profile.id] = profile;
+        return map;
+      }, {});
+
+      // Transform data for admin view with manual join
+      const transformedDocuments = documents.map(doc => {
+        const userProfile = profileMap[doc.user_id];
+        return {
+          id: doc.id,
+          userId: doc.user_id,
+          userName: userProfile?.full_name || 'Unknown User',
+          userPlate: userProfile?.vehicle_plate || 'N/A',
+          name: doc.document_type === 'license' ? "Driver's License" :
+                doc.document_type === 'roadworthiness' ? 'Road Worthiness Certificate' :
+                'Insurance Certificate',
+          type: doc.document_type,
+          fileName: doc.file_name,
+          expiryDate: doc.expiry_date,
+          uploadDate: doc.created_at?.split('T')[0],
+          fileUrl: doc.file_url,
+          status: doc.status || DOCUMENT_STATUS.PENDING,
+          rejectionReason: doc.rejection_reason,
+          reviewedAt: doc.reviewed_at,
+          reviewedBy: doc.reviewed_by
+        };
+      });
+
+      console.log(`Transformed ${transformedDocuments.length} documents for admin view`);
+      return { success: true, documents: transformedDocuments };
+    } catch (error) {
+      console.error('Error in fetchAllDocuments:', error);
+      return { success: false, message: 'An error occurred while fetching documents' };
+    }
+  };
+
+  const updateDocumentStatus = async (documentId, status, rejectionReason = null) => {
+    try {
+      const updateData = {
+        status,
+        reviewed_at: new Date().toISOString(),
+        reviewed_by: state.currentUser?.id
+      };
+
+      if (status === DOCUMENT_STATUS.REJECTED && rejectionReason) {
+        updateData.rejection_reason = rejectionReason;
+      } else if (status === DOCUMENT_STATUS.APPROVED) {
+        updateData.rejection_reason = null; // Clear any previous rejection reason
+      }
+
+      const { data, error } = await supabase
+        .from('documents')
+        .update(updateData)
+        .eq('id', documentId)
+        .select()
+        .single();
+
+      if (error) {
+        console.error('Error updating document status:', error);
+        return { success: false, message: error.message };
+      }
+
+      return { success: true, document: data };
+    } catch (error) {
+      console.error('Error in updateDocumentStatus:', error);
+      return { success: false, message: 'An error occurred while updating document status' };
+    }
   };
 
   // Password reset functions
@@ -765,6 +1392,48 @@ export const AppProvider = ({ children }) => {
     }
   };
 
+  // Function to manually refresh user profile
+  const refreshUserProfile = async () => {
+    if (state.currentUser?.id) {
+      await fetchUserProfile(state.currentUser.id, true);
+    }
+  };
+
+  // Toast notification functions
+  let toastId = 0;
+  const addToast = (message, type = 'success', duration = 4000) => {
+    const id = ++toastId;
+    const toast = { id, message, type, duration, timestamp: Date.now() };
+    dispatch({ type: actionTypes.ADD_TOAST, payload: toast });
+    
+    // Auto remove after duration
+    setTimeout(() => {
+      dispatch({ type: actionTypes.REMOVE_TOAST, payload: id });
+    }, duration);
+    
+    return id;
+  };
+
+  const removeToast = (id) => {
+    dispatch({ type: actionTypes.REMOVE_TOAST, payload: id });
+  };
+
+  const showSuccess = (message, duration = 4000) => {
+    return addToast(message, 'success', duration);
+  };
+
+  const showError = (message, duration = 6000) => {
+    return addToast(message, 'error', duration);
+  };
+
+  const showWarning = (message, duration = 5000) => {
+    return addToast(message, 'warning', duration);
+  };
+
+  const showInfo = (message, duration = 4000) => {
+    return addToast(message, 'info', duration);
+  };
+
   const value = {
     state,
     login,
@@ -777,9 +1446,19 @@ export const AppProvider = ({ children }) => {
     addDocument,
     fetchComplaints,
     fetchDocuments,
+    fetchAllDocuments,
+    updateDocumentStatus,
+    refreshUserProfile,
     getComplaintsByUser,
     getComplaintsAgainstUser,
-    getDocumentsByUser
+    getDocumentsByUser,
+    // Toast functions
+    addToast,
+    removeToast,
+    showSuccess,
+    showError,
+    showWarning,
+    showInfo
   };
 
   return (
