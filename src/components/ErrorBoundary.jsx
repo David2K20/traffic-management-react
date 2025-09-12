@@ -56,7 +56,19 @@ class ErrorBoundary extends React.Component {
   };
 
   handleReload = () => {
-    window.location.reload();
+    // Only use hard reload as absolute last resort
+    // Try to reset the error state first
+    if (this.state.retryCount < 3) {
+      this.setState({
+        hasError: false,
+        error: null,
+        errorInfo: null,
+        retryCount: this.state.retryCount + 1
+      });
+    } else {
+      // After multiple attempts, perform hard reload
+      window.location.reload();
+    }
   };
 
   render() {

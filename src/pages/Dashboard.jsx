@@ -1,7 +1,8 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
-import { FaPlus, FaList, FaFileAlt, FaExclamationTriangle, FaBell } from 'react-icons/fa';
+import { FaPlus, FaList, FaFileAlt, FaExclamationTriangle, FaBell, FaUpload } from 'react-icons/fa';
 import { useApp } from '../context/AppContext';
+import { DOCUMENT_STATUS } from '../lib/supabase';
 import Card from '../components/ui/Card';
 import Badge from '../components/ui/Badge';
 import Button from '../components/ui/Button';
@@ -19,6 +20,8 @@ const Dashboard = () => {
   const [dataError, setDataError] = useState(null);
   const [retryCount, setRetryCount] = useState(0);
   const [lastFetchTime, setLastFetchTime] = useState(null);
+  const hasDataBeenFetched = useRef(false);
+  const lastAuthStateRef = useRef(null);
   
   // Fetch data with retry logic
   const fetchDashboardData = async (isRetry = false, retryAttempt = 0) => {
@@ -78,22 +81,47 @@ const Dashboard = () => {
     }
   };
   
-  // Fetch data when component mounts or user changes
+  // Fetch data only when truly necessary - improved to prevent token refresh triggered fetches
   useEffect(() => {
-    if (currentUser?.id) {
-      console.log('Dashboard mounted with user, fetching data...');
-      fetchDashboardData();
-    }
-  }, [currentUser?.id]); // Only depend on user ID, not the entire user object
-  
-  // Also fetch data when auth is restored (for refresh scenarios)
-  useEffect(() => {
+    let isMounted = true;
+    
     const { isAuthRestored, authInitialized } = state;
-    if (isAuthRestored && authInitialized && currentUser?.id && state.complaints.length === 0) {
-      console.log('Auth restored but no data loaded, fetching dashboard data...');
-      fetchDashboardData();
+    
+    // Create a stable reference for the current auth state (excluding timestamp changes)
+    const currentAuthState = `${isAuthRestored}_${authInitialized}_${currentUser?.id}`;
+    
+    // Only proceed if auth is complete and we have a user
+    if (isAuthRestored && authInitialized && currentUser?.id) {
+      // Check if we need to fetch data with more restrictive conditions
+      const shouldFetch = 
+        !hasDataBeenFetched.current && // Never fetched before
+        (state.complaints.length === 0 || state.documents.length === 0); // AND no data loaded
+      
+      // CRITICAL FIX: Don't fetch data on auth state changes after initial load
+      // This prevents the auto-refresh behavior when token refreshes occur
+      const isInitialLoad = !hasDataBeenFetched.current;
+      
+      if (shouldFetch && isMounted && isInitialLoad) {
+        console.log('Initial dashboard data fetch - auth complete and user available');
+        hasDataBeenFetched.current = true;
+        lastAuthStateRef.current = currentAuthState;
+        
+        fetchDashboardData().catch(error => {
+          console.error('Dashboard data fetch failed:', error);
+          // Reset hasDataBeenFetched on error to allow retry
+          hasDataBeenFetched.current = false;
+        });
+      } else if (!shouldFetch) {
+        console.log('Skipping dashboard data fetch - data already loaded or not initial load');
+        // Still update the reference to track state changes
+        lastAuthStateRef.current = currentAuthState;
+      }
     }
-  }, [state.isAuthRestored, state.authInitialized, currentUser?.id, state.complaints.length]);
+    
+    return () => {
+      isMounted = false;
+    };
+  }, [state.isAuthRestored, state.authInitialized, currentUser?.id]); // REMOVED state.complaints.length, state.documents.length from dependencies
   
   // Manual refresh function
   const handleManualRefresh = () => {
@@ -127,8 +155,8 @@ const Dashboard = () => {
     return daysUntilExpiry <= 30 && daysUntilExpiry > 0;
   });
   
-  const rejectedDocuments = userDocuments.filter(doc => doc.status === 'Rejected');
-  const pendingDocuments = userDocuments.filter(doc => doc.status === 'Pending' || !doc.status);
+  const rejectedDocuments = userDocuments.filter(doc => doc.status === DOCUMENT_STATUS.REJECTED);
+  const pendingDocuments = userDocuments.filter(doc => doc.status === DOCUMENT_STATUS.PENDING || !doc.status);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
@@ -335,15 +363,38 @@ const Dashboard = () => {
           {rejectedDocuments.length > 0 && (
             <div className="mb-4">
               <div className="bg-red-50 border border-red-200 rounded-lg p-3">
-                <div className="flex items-center">
-                  <FaExclamationTriangle className="text-red-600 mr-2" />
-                  <span className="font-medium text-red-800">Documents Rejected</span>
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center">
+                    <FaExclamationTriangle className="text-red-600 mr-2" />
+                    <span className="font-medium text-red-800">Documents Rejected</span>
+                  </div>
+                  <div className="flex items-center text-blue-600">
+                    <FaUpload className="mr-1" size={12} />
+                    <span className="text-xs font-medium">Click to re-upload</span>
+                  </div>
                 </div>
-                <div className="mt-2 space-y-1">
+                <div className="mt-3 space-y-2">
                   {rejectedDocuments.map(doc => (
-                    <p key={doc.id} className="text-sm text-red-700">
-                      {doc.name} was rejected - {doc.rejectionReason || 'Please contact admin'}
-                    </p>
+                    <div key={doc.id} className="flex items-center justify-between p-2 bg-white rounded border border-red-100">
+                      <div className="flex-1">
+                        <p className="text-sm font-medium text-red-700">{doc.name}</p>
+                        <p className="text-xs text-red-600">{doc.rejectionReason || 'Please contact admin'}</p>
+                      </div>
+                      <Button
+                        variant="outline"
+                        size="sm"
+                        className="text-blue-600 border-blue-600 hover:bg-blue-50 hover:border-blue-700 transition-colors duration-200 flex items-center ml-2"
+                        onClick={() => {
+                          setSelectedDocumentType(doc.type);
+                          setSelectedDocument(doc);
+                          setShowDocumentUpload(true);
+                        }}
+                        title={`Upload new ${doc.name.toLowerCase()}`}
+                      >
+                        <FaUpload className="mr-1" size={10} />
+                        Re-upload
+                      </Button>
+                    </div>
                   ))}
                 </div>
               </div>
@@ -429,11 +480,11 @@ const Dashboard = () => {
                     {/* Document Verification Status */}
                     <div className="mb-2">
                       <p className="text-xs text-gray-500 mb-1">Verification Status:</p>
-                      <div className="flex items-center space-x-2">
+                      <div className="flex items-center justify-between">
                         <Badge 
                           variant={
-                            doc.status === 'Approved' ? 'resolved' : 
-                            doc.status === 'Rejected' ? 'rejected' : 
+                            doc.status === DOCUMENT_STATUS.APPROVED ? 'resolved' : 
+                            doc.status === DOCUMENT_STATUS.REJECTED ? 'rejected' : 
                             'pending'
                           }
                           size="sm"
@@ -442,31 +493,34 @@ const Dashboard = () => {
                         </Badge>
                         
                         {/* Re-upload button for rejected documents */}
-                        {doc.status === 'Rejected' && (
+                        {doc.status === DOCUMENT_STATUS.REJECTED && (
                           <Button 
                             variant="outline" 
                             size="sm"
-                            className="text-blue-600 border-blue-600 hover:bg-blue-50 flex items-center"
+                            className="text-blue-600 border-blue-600 hover:bg-blue-50 hover:border-blue-700 transition-colors duration-200 flex items-center ml-2"
                             onClick={() => {
                               setSelectedDocumentType(docType);
                               setSelectedDocument(doc); // Pass the existing document
                               setShowDocumentUpload(true);
                             }}
-                            title="Upload new version"
+                            title="Upload new document to replace the rejected one"
                           >
-                            <FaPlus className="mr-1" />
-                            Re-upload
+                            <FaUpload className="mr-1" size={12} />
+                            Upload New
                           </Button>
                         )}
                       </div>
                     </div>
                     
                     {/* Rejection Reason */}
-                    {doc.status === 'Rejected' && doc.rejectionReason && (
+                    {doc.status === DOCUMENT_STATUS.REJECTED && doc.rejectionReason && (
                       <div className="mt-2 p-2 bg-red-50 border border-red-200 rounded">
                         <p className="text-xs text-red-600 font-medium mb-1">Reason for rejection:</p>
                         <p className="text-xs text-red-700">{doc.rejectionReason}</p>
-                        <p className="text-xs text-blue-600 mt-1 font-medium">Upload a new version using the button above</p>
+                        <div className="flex items-center mt-2">
+                          <FaUpload className="text-blue-600 mr-1" size={10} />
+                          <p className="text-xs text-blue-600 font-medium">Click "Upload New" button above to submit a replacement</p>
+                        </div>
                       </div>
                     )}
                     

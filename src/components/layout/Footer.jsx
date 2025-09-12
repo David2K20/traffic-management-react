@@ -12,7 +12,7 @@ const Footer = () => {
           </div>
           
           <div className="text-sm text-gray-400">
-            <p>&copy; 2024 Traffic Management System. All rights reserved.</p>
+            <p>&copy; 2025 Traffic Management System. All rights reserved.</p>
           </div>
         </div>
         

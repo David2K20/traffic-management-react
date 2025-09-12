@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { FaPlus, FaEye, FaFilter, FaSearch } from 'react-icons/fa';
 import { useApp } from '../context/AppContext';
@@ -8,9 +8,28 @@ import Button from '../components/ui/Button';
 import FormInput from '../components/ui/FormInput';
 
 const MyComplaints = () => {
-  const { state, getComplaintsByUser } = useApp();
+  const { state, getComplaintsByUser, fetchComplaints } = useApp();
   const { currentUser } = state;
   const [searchTerm, setSearchTerm] = useState('');
+  const hasFetchedOnMount = useRef(false);
+
+  // Ensure complaints are loaded when directly refreshing on this page
+  useEffect(() => {
+    if (
+      state.isAuthRestored &&
+      state.authInitialized &&
+      currentUser?.id &&
+      state.complaints.length === 0 &&
+      !hasFetchedOnMount.current
+    ) {
+      hasFetchedOnMount.current = true;
+      fetchComplaints().catch((err) => {
+        console.error('Failed to fetch complaints on MyComplaints mount:', err);
+        // allow retry on next render if needed
+        hasFetchedOnMount.current = false;
+      });
+    }
+  }, [state.isAuthRestored, state.authInitialized, currentUser?.id, state.complaints.length, fetchComplaints]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [priorityFilter, setPriorityFilter] = useState('all');
   

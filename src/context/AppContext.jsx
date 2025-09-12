@@ -3,6 +3,7 @@ import { supabase, USER_ROLES, COMPLAINT_STATUS, COMPLAINT_PRIORITY, STORAGE_BUC
 import { createStorageBuckets } from '../utils/createStorageBuckets';
 import { setupStoragePolicies } from '../utils/setupStoragePolicies';
 import { setupDatabasePolicies, printDatabasePolicyInstructions } from '../utils/setupDatabasePolicies';
+import { isCategoryRestricted } from '../constants/complaintCategories';
 
 const AppContext = createContext();
 
@@ -12,10 +13,10 @@ const STORAGE_KEYS = {
   AUTH_STATE: 'traffic_app_auth_state'
 };
 
-// Helper functions for localStorage
+// Helper functions for tab-scoped storage (sessionStorage)
 const getStoredUserProfile = () => {
   try {
-    const stored = localStorage.getItem(STORAGE_KEYS.USER_PROFILE);
+    const stored = sessionStorage.getItem(STORAGE_KEYS.USER_PROFILE);
     return stored ? JSON.parse(stored) : null;
   } catch (error) {
     console.error('Error reading stored user profile:', error);
@@ -26,9 +27,9 @@ const getStoredUserProfile = () => {
 const setStoredUserProfile = (userProfile) => {
   try {
     if (userProfile) {
-      localStorage.setItem(STORAGE_KEYS.USER_PROFILE, JSON.stringify(userProfile));
+      sessionStorage.setItem(STORAGE_KEYS.USER_PROFILE, JSON.stringify(userProfile));
     } else {
-      localStorage.removeItem(STORAGE_KEYS.USER_PROFILE);
+      sessionStorage.removeItem(STORAGE_KEYS.USER_PROFILE);
     }
   } catch (error) {
     console.error('Error storing user profile:', error);
@@ -37,7 +38,7 @@ const setStoredUserProfile = (userProfile) => {
 
 const getStoredAuthState = () => {
   try {
-    const stored = localStorage.getItem(STORAGE_KEYS.AUTH_STATE);
+    const stored = sessionStorage.getItem(STORAGE_KEYS.AUTH_STATE);
     return stored ? JSON.parse(stored) : null;
   } catch (error) {
     console.error('Error reading stored auth state:', error);
@@ -48,9 +49,9 @@ const getStoredAuthState = () => {
 const setStoredAuthState = (authState) => {
   try {
     if (authState) {
-      localStorage.setItem(STORAGE_KEYS.AUTH_STATE, JSON.stringify(authState));
+      sessionStorage.setItem(STORAGE_KEYS.AUTH_STATE, JSON.stringify(authState));
     } else {
-      localStorage.removeItem(STORAGE_KEYS.AUTH_STATE);
+      sessionStorage.removeItem(STORAGE_KEYS.AUTH_STATE);
     }
   } catch (error) {
     console.error('Error storing auth state:', error);
@@ -249,7 +250,41 @@ export const AppProvider = ({ children }) => {
     let isMounted = true;
     let initializationStarted = false;
     let timeoutId = null;
-    
+    // Track if we've already handled a sign-in for a given user to avoid duplicate fetches
+    let handledSignInForUserId = null;
+
+    // Unified session handler to make SIGNED_IN and INITIAL_SESSION idempotent
+    const handleSessionAuth = async (event, session) => {
+      if (!session?.user) return;
+      const userId = session.user.id;
+
+      // If we've already handled this user, skip duplicate handling
+      if (handledSignInForUserId === userId && (event === 'SIGNED_IN' || event === 'INITIAL_SESSION')) {
+        console.log('Auth event already handled for user:', userId, 'event:', event);
+        return;
+      }
+
+      // Update auth state timestamp, but do not force any reloads
+      setStoredAuthState({
+        userId,
+        email: session.user.email,
+        timestamp: Date.now()
+      });
+
+      // Use cached user immediately if available to avoid UI blocking
+      const cachedProfile = getStoredUserProfile();
+      if (cachedProfile?.id === userId) {
+        dispatch({ type: actionTypes.SET_USER, payload: cachedProfile });
+      }
+
+      // Fetch profile only if we have no cached user or IDs mismatch
+      if (!cachedProfile || cachedProfile.id !== userId) {
+        await fetchUserProfile(userId, false);
+      }
+
+      handledSignInForUserId = userId;
+    };
+
     const initializeAuth = async () => {
       // Prevent duplicate initialization
       if (initializationStarted) {
@@ -334,14 +369,12 @@ export const AppProvider = ({ children }) => {
             if (isRecentCache && storedProfile) {
               console.log('Using cached profile for immediate display');
               dispatch({ type: actionTypes.SET_USER, payload: storedProfile });
-              // Refresh profile in background
-              setTimeout(() => {
-                if (isMounted) {
-                  fetchUserProfile(session.user.id, true).catch(console.error);
-                }
-              }, 100);
+              // Do not trigger an immediate background refresh here to avoid duplicate fetches.
+              // The auth state listener will ensure freshness if needed.
             } else {
               console.log('Fetching fresh profile data');
+              // Mark as handled to avoid duplicate fetch on subsequent auth event
+              handledSignInForUserId = session.user.id;
               await fetchUserProfile(session.user.id, false);
             }
           }
@@ -398,31 +431,36 @@ export const AppProvider = ({ children }) => {
 
     initializeAuth();
 
-    // Listen for auth changes
-    const { data: { subscription } } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
+    // Listen for auth changes - using a stable reference
+    let authSubscription = null;
+    
+    const createAuthListener = () => {
+      // Capture current state value to avoid stale closure
+      const getCurrentUser = () => {
+        return getStoredUserProfile();
+      };
+      
+      return supabase.auth.onAuthStateChange(async (event, session) => {
         console.log('Auth state change:', event, session?.user?.email || 'no user', 'Email confirmed:', session?.user?.email_confirmed_at || 'n/a');
         
         if (!isMounted) return;
         
-        if (event === 'SIGNED_IN' && session?.user) {
-          console.log('User signed in, setting auth state and fetching profile');
-          setStoredAuthState({
-            userId: session.user.id,
-            email: session.user.email,
-            timestamp: Date.now()
-          });
-          await fetchUserProfile(session.user.id, true);
+        if ((event === 'SIGNED_IN' && session?.user)) {
+          console.log('User signed in, handling session...');
+          await handleSessionAuth('SIGNED_IN', session);
         } else if (event === 'SIGNED_OUT' || (!session && event !== 'INITIAL_SESSION')) {
           console.log('User signed out or session ended, clearing all state');
           // Clear all stored data immediately
           setStoredUserProfile(null);
           setStoredAuthState(null);
+          handledSignInForUserId = null; // Reset handled user on sign out
           // Clear app state
           dispatch({ type: actionTypes.LOGOUT });
         } else if (event === 'TOKEN_REFRESHED' && session?.user) {
-          console.log('Token refreshed, updating auth state');
-          // Handle token refresh - update stored auth state timestamp
+          console.log('Token refreshed - minimal handling to prevent auto-refresh');
+          // CRITICAL FIX: Minimal handling of token refresh to prevent auto-refresh cycles
+          
+          // Only update auth state timestamp - do not trigger any profile fetching
           const newAuthState = {
             userId: session.user.id,
             email: session.user.email,
@@ -430,13 +468,22 @@ export const AppProvider = ({ children }) => {
           };
           setStoredAuthState(newAuthState);
           
-          // Optionally refresh profile if it's been a while
-          const currentStoredState = getStoredAuthState();
-          const lastFetch = currentStoredState?.timestamp;
-          const fiveMinutesAgo = Date.now() - (5 * 60 * 1000);
-          if (!lastFetch || lastFetch < fiveMinutesAgo) {
-            await fetchUserProfile(session.user.id, true);
+          // IMPORTANT: Do not fetch profile data on token refresh
+          // This prevents the auto-refresh behavior when returning to tabs
+          // The existing user profile and data should remain valid
+          console.log('Token refresh handled without triggering data refresh');
+          
+          // Only fetch profile if we somehow lost the current user (avoid stale closure)
+          const currentCachedUser = getCurrentUser();
+          if (!currentCachedUser) {
+            console.warn('Missing cached user during token refresh - fetching fresh profile');
+            await fetchUserProfile(session.user.id, false);
+          } else {
+            console.log('Current user still cached, skipping profile fetch on token refresh');
           }
+        } else if (event === 'INITIAL_SESSION' && session?.user) {
+          console.log('Initial session present, handling without duplication');
+          await handleSessionAuth('INITIAL_SESSION', session);
         } else if (event === 'INITIAL_SESSION' && !session) {
           console.log('Initial session check - no session found');
           // Only clear state if we have stale cached data
@@ -449,17 +496,23 @@ export const AppProvider = ({ children }) => {
             dispatch({ type: actionTypes.LOGOUT });
           }
         }
-      }
-    );
+      });
+    };
+    
+    // Create the auth listener
+    const authListenerResult = createAuthListener();
+    authSubscription = authListenerResult.data.subscription;
 
     return () => {
       isMounted = false;
       if (timeoutId) {
         clearTimeout(timeoutId);
       }
-      subscription.unsubscribe();
+      if (authSubscription) {
+        authSubscription.unsubscribe();
+      }
     };
-  }, []);
+  }, []); // Empty dependency array - this effect should only run once
 
   // Fetch user profile from database
   const fetchUserProfile = async (userId, forceRefresh = false) => {
@@ -694,13 +747,10 @@ export const AppProvider = ({ children }) => {
       dispatch({ type: actionTypes.LOGOUT });
       
       // Sign out from Supabase in the background
-      supabase.auth.signOut().catch(error => {
+      await supabase.auth.signOut().catch(error => {
         console.error('Supabase signOut error:', error);
         // Don't block logout even if Supabase signOut fails
       });
-      
-      // Immediately redirect to login page
-      window.location.href = '/login';
       
       return { success: true };
     } catch (error) {
@@ -709,8 +759,6 @@ export const AppProvider = ({ children }) => {
       setStoredUserProfile(null);
       setStoredAuthState(null);
       dispatch({ type: actionTypes.LOGOUT });
-      // Still redirect to login even on error
-      window.location.href = '/login';
       return { success: false, message: 'An error occurred during logout, but you have been logged out locally' };
     }
   };
@@ -897,6 +945,14 @@ export const AppProvider = ({ children }) => {
 
   const addComplaint = async (complaintData) => {
     try {
+      // Validate category restrictions for non-admin users
+      if (state.currentUser?.userType !== USER_ROLES.ADMIN && isCategoryRestricted(complaintData.category)) {
+        return { 
+          success: false, 
+          message: 'This category is restricted to law enforcement officials only' 
+        };
+      }
+      
       let imageUrl = null;
 
       // Upload image if provided

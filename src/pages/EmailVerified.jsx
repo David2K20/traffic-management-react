@@ -32,13 +32,13 @@ const EmailVerified = () => {
                 Your email address has been successfully verified.
               </p>
               <p className="text-sm text-green-700 mt-2 font-medium">
-                Please return to the app to continue.
+                Please return to the web app to continue.
               </p>
             </div>
 
             <div className="bg-blue-50 border border-blue-200 rounded-lg p-4">
               <p className="text-xs text-blue-700">
-                You can now close this window and return to the Traffic Management System app.
+                You can now close this window and return to the Traffic Management System web app.
                 Click "I have verified my email" to access your dashboard.
               </p>
             </div>

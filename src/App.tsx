@@ -1,4 +1,4 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate, useNavigate } from 'react-router-dom';
 import { AppProvider, useApp } from './context/AppContext';
 import Layout from './components/layout/Layout';
 import ProtectedRoute from './components/ProtectedRoute';
@@ -6,7 +6,7 @@ import SkeletonLoader from './components/ui/SkeletonLoader';
 import ToastContainer from './components/ToastContainer';
 import ErrorBoundary from './components/ErrorBoundary';
 import ConnectionMonitor from './components/ConnectionMonitor';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 
 // Pages
 import Home from './pages/Home';
@@ -25,7 +25,8 @@ import EmailVerified from './pages/EmailVerified';
 
 // App Routes Component - MUST be inside AppProvider
 const AppRoutes = () => {
-  const { state, refreshUserProfile } = useApp();
+  const { state, refreshUserProfile, logout } = useApp();
+  const navigate = useNavigate();
   const { 
     currentUser, 
     loading, 
@@ -38,63 +39,78 @@ const AppRoutes = () => {
 
   const [showRetryOption, setShowRetryOption] = useState(false);
   const [retryAttempts, setRetryAttempts] = useState(0);
+  const [hasTriggeredTimeout, setHasTriggeredTimeout] = useState(false);
 
-  // Add timeout for authentication to prevent infinite loading
+  // Handle authentication timeouts more gracefully
   useEffect(() => {
-    let authTimeoutId: NodeJS.Timeout | null = null;
     let retryTimeoutId: NodeJS.Timeout | null = null;
+    let authTimeoutId: NodeJS.Timeout | null = null;
     
-    // If auth is not initialized after 3 seconds and we don't have a user, something is wrong
-    if (!authInitialized && !currentUser) {
-      authTimeoutId = setTimeout(() => {
-        console.warn('Authentication taking too long, redirecting to login');
-        localStorage.clear(); // Clear any corrupted data
-        window.location.href = '/login';
-      }, 3000);
+    // Only trigger timeout logic if we haven't already triggered it
+    if (!hasTriggeredTimeout) {
+      // Extend timeout to 10 seconds for better user experience
+      // Only trigger if we have no user and auth isn't initialized
+      if (!authInitialized && !currentUser && !loading && !profileLoading) {
+        authTimeoutId = setTimeout(() => {
+          console.warn('Authentication taking longer than expected');
+          setHasTriggeredTimeout(true);
+          setShowRetryOption(true);
+        }, 10000); // Increased to 10 seconds
+      }
+      
+      // Show retry option after 15 seconds if still loading without cached data
+      const isActuallyStuck = (loading || profileLoading || !isAuthRestored) && 
+                             !currentUser && 
+                             !loadingTimeout;
+      
+      if (isActuallyStuck) {
+        retryTimeoutId = setTimeout(() => {
+          setShowRetryOption(true);
+          setHasTriggeredTimeout(true);
+        }, 15000); // Increased to 15 seconds
+      }
     }
     
-    // Show retry option after 8 seconds if still loading without cached data
-    const isActuallyStuck = (loading || profileLoading || !isAuthRestored) && 
-                           !currentUser && 
-                           !loadingTimeout;
-    
-    if (isActuallyStuck) {
-      retryTimeoutId = setTimeout(() => {
-        setShowRetryOption(true);
-      }, 8000);
-    } else {
+    // Reset retry option if we get a user
+    if (currentUser && showRetryOption) {
       setShowRetryOption(false);
+      setHasTriggeredTimeout(false);
     }
     
     return () => {
       if (authTimeoutId) clearTimeout(authTimeoutId);
       if (retryTimeoutId) clearTimeout(retryTimeoutId);
     };
-  }, [loading, profileLoading, currentUser, isAuthRestored, loadingTimeout, authInitialized]);
+  }, [loading, profileLoading, currentUser, isAuthRestored, loadingTimeout, authInitialized, hasTriggeredTimeout, showRetryOption]);
 
-  // Handle retry
-  const handleRetry = async () => {
+  // Handle retry with better logic
+  const handleRetry = useCallback(async () => {
     setRetryAttempts(prev => prev + 1);
     setShowRetryOption(false);
+    setHasTriggeredTimeout(false);
     
     try {
       if (state.currentUser?.id) {
+        console.log('Refreshing user profile...');
         await refreshUserProfile();
       } else {
-        // Force page reload as last resort after multiple failed attempts
-        if (retryAttempts >= 2) {
-          console.log('Multiple retry attempts failed, reloading page');
+        // Only reload page as absolute last resort after many failed attempts
+        if (retryAttempts >= 4) {
+          console.log('Multiple retry attempts failed, performing page reload as last resort');
           window.location.reload();
           return;
         }
         
-        // Try to reinitialize auth
+        // Try to reinitialize auth with longer wait
         console.log('Attempting to reinitialize authentication...');
-        await new Promise(resolve => setTimeout(resolve, 1000)); // Brief pause
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Longer pause
         
         // Check if we now have a user after waiting
         if (!state.currentUser) {
-          setShowRetryOption(true);
+          // Show retry option again but don't trigger timeout immediately
+          setTimeout(() => {
+            setShowRetryOption(true);
+          }, 3000);
         }
       }
     } catch (error) {
@@ -102,17 +118,26 @@ const AppRoutes = () => {
       // Show retry option again after a delay
       setTimeout(() => {
         setShowRetryOption(true);
-      }, 3000);
+      }, 5000);
     }
-  };
+  }, [state.currentUser, refreshUserProfile, retryAttempts]);
 
-  // Handle force logout and redirect to login
-  const handleForceLogout = () => {
-    console.log('Forcing logout and redirect to login');
-    // Clear all stored data and redirect
-    localStorage.clear();
-    window.location.href = '/login';
-  };
+  // Handle force logout and navigate to login
+  const handleForceLogout = useCallback(async () => {
+    console.log('Forcing logout and navigating to login');
+    try {
+      // Use proper logout function which clears data appropriately
+      await logout();
+      // Navigate using React Router instead of hard redirect
+      navigate('/login', { replace: true });
+    } catch (error) {
+      console.error('Logout failed:', error);
+      // Only use hard redirect as absolute fallback
+      try { sessionStorage.clear(); } catch {}
+      try { localStorage.clear(); } catch {}
+      window.location.href = '/login';
+    }
+  }, [logout, navigate]);
 
   // Simplified loading logic - only show loading if we're actually initializing and don't have cached data
   const shouldShowLoading = !authInitialized && !currentUser;

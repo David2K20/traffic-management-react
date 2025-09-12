@@ -5,6 +5,7 @@ import { useApp } from '../context/AppContext';
 import Button from '../components/ui/Button';
 import FormInput from '../components/ui/FormInput';
 import Card from '../components/ui/Card';
+import { getCategoriesByRole, isCategoryRestricted } from '../constants/complaintCategories';
 
 const SubmitComplaint = () => {
   const [formData, setFormData] = useState({
@@ -26,16 +27,8 @@ const SubmitComplaint = () => {
   const { currentUser } = state;
   const navigate = useNavigate();
 
-  const categories = [
-    { value: 'wrong_parking', label: 'Wrong Parking' },
-    { value: 'noise_pollution', label: 'Noise Pollution' },
-    { value: 'blocked_driveway', label: 'Blocked Driveway' },
-    { value: 'illegal_horn', label: 'Illegal Use of Horn' },
-    { value: 'overspeeding', label: 'Overspeeding' },
-    { value: 'no_seatbelt', label: 'No Seatbelt' },
-    { value: 'phone_driving', label: 'Phone Use While Driving' },
-    { value: 'others', label: 'Others' }
-  ];
+  // Get categories based on user role - regular users only see public categories
+  const categories = getCategoriesByRole(currentUser?.userType);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
@@ -81,6 +74,8 @@ const SubmitComplaint = () => {
     
     if (!formData.category) {
       newErrors.category = 'Category is required';
+    } else if (currentUser?.userType !== 'admin' && isCategoryRestricted(formData.category)) {
+      newErrors.category = 'This category is not available for citizen complaints';
     }
     
     if (!formData.offenderPlate.trim()) {

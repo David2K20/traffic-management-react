@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import { FaEye, FaEdit, FaSearch, FaFilter, FaPlus } from 'react-icons/fa';
 import { useApp } from '../context/AppContext';
@@ -10,9 +10,27 @@ import Modal from '../components/ui/Modal';
 
 const AdminComplaints = () => {
   const { state, updateComplaint } = useApp();
-  const { complaints } = state;
+  const { complaints, currentUser, isAuthRestored, authInitialized, fetchComplaints } = { ...state, fetchComplaints: useApp().fetchComplaints };
   
   const [searchTerm, setSearchTerm] = useState('');
+  const hasFetchedOnMount = useRef(false);
+
+  // Ensure complaints are loaded when directly refreshing on this page
+  useEffect(() => {
+    if (
+      isAuthRestored &&
+      authInitialized &&
+      currentUser?.id &&
+      complaints.length === 0 &&
+      !hasFetchedOnMount.current
+    ) {
+      hasFetchedOnMount.current = true;
+      fetchComplaints().catch((err) => {
+        console.error('Failed to fetch complaints on AdminComplaints mount:', err);
+        hasFetchedOnMount.current = false;
+      });
+    }
+  }, [isAuthRestored, authInitialized, currentUser?.id, complaints.length, fetchComplaints]);
   const [statusFilter, setStatusFilter] = useState('all');
   const [priorityFilter, setPriorityFilter] = useState('all');
   const [categoryFilter, setCategoryFilter] = useState('all');

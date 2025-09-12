@@ -61,9 +61,9 @@ const ProtectedRoute = ({ children, adminOnly = false }) => {
     checkEmailVerification();
   }, [currentUser, isAuthRestored, authInitialized]);
 
-  // Determine if we should show loading
+  // Determine if we should show loading (only during initial auth restore)
   const shouldShowLoading = (
-    (loading || profileLoading || !isAuthRestored || !authInitialized || checkingVerification) && 
+    (!isAuthRestored || !authInitialized) &&
     !loadingTimeout // Don't show loading if we've timed out - App will handle timeout UI
   );
 

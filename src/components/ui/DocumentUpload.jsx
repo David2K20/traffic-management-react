@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { FaUpload, FaFile, FaTimes } from 'react-icons/fa';
 import { useApp } from '../../context/AppContext';
+import { DOCUMENT_STATUS } from '../../lib/supabase';
 import Button from './Button';
 import FormInput from './FormInput';
 import Modal from './Modal';
@@ -140,7 +141,7 @@ const DocumentUpload = ({ documentType, onSuccess, isOpen, onClose, isReUpload =
       };
 
       // Determine if this is a replacement upload
-      const isReplacement = isReUpload || (existingDocument && existingDocument.status === 'Rejected');
+      const isReplacement = isReUpload || (existingDocument && existingDocument.status === DOCUMENT_STATUS.REJECTED);
       
       const result = await uploadWithRetry(documentData, isReplacement);
 

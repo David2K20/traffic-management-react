@@ -12,7 +12,19 @@ export const supabase = createClient(supabaseUrl, supabaseAnonKey, {
     autoRefreshToken: true,
     persistSession: true,
     detectSessionInUrl: true, // Enable to handle email verification links
-    flowType: 'pkce' // Use PKCE flow for email verification
+    flowType: 'pkce', // Use PKCE flow for email verification
+    // Reduce auto-refresh frequency to prevent excessive token refreshes
+    refreshThreshold: 0.8, // Only refresh when 80% of token lifetime has passed
+    // Make sessions tab-scoped: use sessionStorage so each tab has an independent session
+    storage: typeof window !== 'undefined' ? window.sessionStorage : undefined,
+    // Do not sync auth state across tabs (prevents mirroring)
+    multiTab: false
+  },
+  // Disable automatic refresh on page visibility change to prevent unnecessary refreshes
+  global: {
+    headers: {
+      'X-Client-Info': 'traffic-management-app'
+    }
   }
 })
 

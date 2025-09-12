@@ -5,6 +5,7 @@ import { useApp } from '../context/AppContext';
 import Button from '../components/ui/Button';
 import FormInput from '../components/ui/FormInput';
 import Card from '../components/ui/Card';
+import { getCategoriesByRole } from '../constants/complaintCategories';
 
 const AdminSubmitComplaint = () => {
   const [formData, setFormData] = useState({
@@ -26,16 +27,8 @@ const AdminSubmitComplaint = () => {
   const { currentUser } = state;
   const navigate = useNavigate();
 
-  const categories = [
-    { value: 'wrong_parking', label: 'Wrong Parking' },
-    { value: 'noise_pollution', label: 'Noise Pollution' },
-    { value: 'blocked_driveway', label: 'Blocked Driveway' },
-    { value: 'illegal_horn', label: 'Illegal Use of Horn' },
-    { value: 'overspeeding', label: 'Overspeeding' },
-    { value: 'no_seatbelt', label: 'No Seatbelt' },
-    { value: 'phone_driving', label: 'Phone Use While Driving' },
-    { value: 'others', label: 'Others' }
-  ];
+  // Get categories based on user role - officials see all categories including restricted ones
+  const categories = getCategoriesByRole(currentUser?.userType);
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
